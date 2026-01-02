@@ -1,4 +1,6 @@
-
+from rest_framework import viewsets
+from .models import LoanSchedule, LoanYearSummary, ReportYearSetting
+from .serializers import LoanScheduleSerializer
 # --- Loan Schedule ViewSet ---
 class LoanScheduleViewSet(viewsets.ModelViewSet):
     """
@@ -19,17 +21,61 @@ class LoanScheduleViewSet(viewsets.ModelViewSet):
         """Create loan schedule and generate year summaries"""
         loan_schedule = serializer.save()
         
-        # Generate year summaries after creating loan schedule
-        self._generate_year_summaries(loan_schedule)
+        # Check if frontend provided summaries
+        frontend_summaries = self.request.data.get('yearly_summary')
+        
+        if frontend_summaries and isinstance(frontend_summaries, list):
+            self._save_frontend_summaries(loan_schedule, frontend_summaries)
+        else:
+            # Fallback to backend generation
+            self._generate_year_summaries(loan_schedule)
         
     def perform_update(self, serializer):
         """Update loan schedule and regenerate year summaries"""
         loan_schedule = serializer.save()
         
-        # Delete old summaries and regenerate
+        # Delete old summaries
         LoanYearSummary.objects.filter(loan_schedule=loan_schedule).delete()
-        self._generate_year_summaries(loan_schedule)
+        
+        # Check if frontend provided summaries
+        frontend_summaries = self.request.data.get('yearly_summary')
+        
+        if frontend_summaries and isinstance(frontend_summaries, list):
+            self._save_frontend_summaries(loan_schedule, frontend_summaries)
+        else:
+            # Fallback to backend generation
+            self._generate_year_summaries(loan_schedule)
     
+    def _save_frontend_summaries(self, loan_schedule, summaries_data):
+        """Save summaries provided by frontend"""
+        from decimal import Decimal
+        
+        summaries_to_create = []
+        
+        for item in summaries_data:
+            # Frontend might send 'year_id' or 'year_setting_id'
+            year_setting_id = item.get('year_id') or item.get('year_setting_id')
+            year_setting = None
+            
+            if year_setting_id:
+                try:
+                    year_setting = ReportYearSetting.objects.get(pk=year_setting_id)
+                except ReportYearSetting.DoesNotExist:
+                    pass
+            
+            summaries_to_create.append(LoanYearSummary(
+                loan_schedule=loan_schedule,
+                year_setting=year_setting,
+                year_label=item.get('year_label'),
+                opening_balance=item.get('opening_balance', 0),
+                annual_interest=item.get('annual_interest', 0),
+                annual_principal=item.get('annual_principal', 0),
+                closing_balance=item.get('closing_balance', 0),
+                calculated_emi=item.get('calculated_emi', 0)
+            ))
+        
+        LoanYearSummary.objects.bulk_create(summaries_to_create)
+
     def _generate_year_summaries(self, loan_schedule):
         """
         Generate annual summaries for the loan schedule.

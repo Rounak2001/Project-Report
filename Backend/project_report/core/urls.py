@@ -14,7 +14,10 @@ from core.views import (
     FinancialGroupViewSet,
     FinancialRowViewSet,
     FinancialDataViewSet,
-    LoanScheduleViewSet
+    LoanScheduleViewSet,
+    ExistingWorkingCapitalLoanViewSet,
+    DrawingViewSet,
+    download_report_pdf  # Add PDF download view
 )
 
 # This is the "magic" that automatically creates all the API routes
@@ -30,8 +33,12 @@ router.register(r'groups', FinancialGroupViewSet, basename='financialgroup')
 router.register(r'rows', FinancialRowViewSet, basename='financialrow')
 router.register(r'data', FinancialDataViewSet, basename='financialdata')
 router.register(r'loan-schedules', LoanScheduleViewSet, basename='loanschedule')
+router.register(r'existing-wc-loans', ExistingWorkingCapitalLoanViewSet, basename='existingwcloan')
+router.register(r'drawings', DrawingViewSet, basename='drawing')
 
 urlpatterns = [
+    # PDF download endpoint
+    path('reports/<int:report_id>/download-pdf/', download_report_pdf, name='download-report-pdf'),
     # This one line includes all the API routes we just registered
     path('', include(router.urls)),
 ]

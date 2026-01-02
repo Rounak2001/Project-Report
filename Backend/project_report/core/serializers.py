@@ -3,7 +3,8 @@ from django.contrib.auth.models import User
 from .models import (
     FinancialReport, TermLoan, ProjectCostItem, 
     ReportYearSetting, FinancialGroup, FinancialRow, FinancialData,
-    LoanSchedule, LoanYearSummary
+    LoanSchedule, LoanYearSummary, TermLoanYearSummary, ExistingWorkingCapitalLoan,
+    Drawing
 )
 import datetime
 
@@ -11,6 +12,13 @@ import datetime
 # This is a helper function to get that user
 def get_first_user():
     return User.objects.first()
+
+# --- Serializer for the Year/Column Headers ---
+# This reads the "ReportYearSetting" model
+class ReportYearSettingSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ReportYearSetting
+        fields = ['id', 'year', 'year_display', 'year_type']
 
 # --- Serializer for the main Report object ---
 # This reads and writes to the FinancialReport model
@@ -30,7 +38,8 @@ class FinancialReportSerializer(serializers.ModelSerializer):
             'gst_number', 
             'sector',
             'start_year', 
-            'total_years_in_report', 
+            'total_years_in_report',
+            'tax_regime', # Added tax_regime
             'has_existing_term_loan',
             'new_loan_type', 
             'new_loan_contribution_percent', 
@@ -38,11 +47,35 @@ class FinancialReportSerializer(serializers.ModelSerializer):
             'new_loan_tenure_years', 
             'new_loan_moratorium_months', 
             'new_loan_start_date',
+            'wc_requirement_type',
+            'existing_wc_limit',
+            'existing_wc_interest_rate',
+            'proposed_wc_limit',
+            'proposed_wc_interest_rate',
             'created_at',
             'updated_at',
             # 'year_settings' # We will get this from its own endpoint
         ]
         read_only_fields = ['user', 'created_at', 'updated_at']
+
+# --- Serializer for Term Loan Year Summary ---
+class TermLoanYearSummarySerializer(serializers.ModelSerializer):
+    year_setting = ReportYearSettingSerializer(read_only=True)
+    year_setting_id = serializers.PrimaryKeyRelatedField(
+        queryset=ReportYearSetting.objects.all(),
+        source='year_setting',
+        write_only=True,
+        required=False, # Now optional
+        allow_null=True
+    )
+    
+    class Meta:
+        model = TermLoanYearSummary
+        fields = [
+            'id', 'year_setting', 'year_setting_id', 'year_label', # Added year_label
+            'opening_balance', 'annual_interest', 'annual_principal', 
+            'closing_balance', 'calculated_emi'
+        ]
 
 # --- Serializer for the "Existing Term Loans" list (UPDATED) ---
 class TermLoanSerializer(serializers.ModelSerializer):
@@ -54,6 +87,9 @@ class TermLoanSerializer(serializers.ModelSerializer):
     )
     # We will set the user from the view
     user = serializers.PrimaryKeyRelatedField(read_only=True)
+    
+    # Nested summaries
+    year_summaries = TermLoanYearSummarySerializer(many=True, read_only=True)
 
     class Meta:
         model = TermLoan
@@ -63,10 +99,15 @@ class TermLoanSerializer(serializers.ModelSerializer):
             'report',
             'user',
             'loan_name', 
+            'start_date',
+            'original_amount',
+            'tenure_months',
+            'repayment_method',
             'outstanding_amount',
             'interest_rate', 
             'emi', 
-            'remaining_tenure_years'
+            'remaining_tenure_years',
+            'year_summaries'
         ]
 
 # --- Serializer for the "Project Cost (Details of Asset)" list ---
@@ -149,16 +190,15 @@ class FinancialGroupSerializer(serializers.ModelSerializer):
             'name', 
             'page_type', 
             'order',
+            'cf_bucket',    # Cash flow activity bucket
+            'nature',       # Direction of cash impact
+            'system_tag',   # Unique logic identifier
             'rows' # This will contain the list of rows (which contain their data)
         ]
 
 
-# --- Serializer for the Year/Column Headers ---
-# This reads the "ReportYearSetting" model
-class ReportYearSettingSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = ReportYearSetting
-        fields = ['id', 'year', 'year_display', 'year_type']
+
+
 
 # --- Serializer for Loan Year Summary ---
 class LoanYearSummarySerializer(serializers.ModelSerializer):
@@ -167,7 +207,8 @@ class LoanYearSummarySerializer(serializers.ModelSerializer):
     class Meta:
         model = LoanYearSummary
         fields = [
-            'id', 'year_setting', 'opening_balance', 'annual_interest',
+            'id', 'year_setting', 'year_label', # Added year_label
+            'opening_balance', 'annual_interest',
             'annual_principal', 'closing_balance', 'calculated_emi'
         ]
 
@@ -190,3 +231,29 @@ class LoanScheduleSerializer(serializers.ModelSerializer):
             'updated_at'
         ]
         read_only_fields = ['created_at', 'updated_at']
+
+# --- Serializer for Existing Working Capital Loans ---
+class ExistingWorkingCapitalLoanSerializer(serializers.ModelSerializer):
+    report = serializers.PrimaryKeyRelatedField(
+        queryset=FinancialReport.objects.all(), 
+        required=False
+    )
+    
+    class Meta:
+        model = ExistingWorkingCapitalLoan
+        fields = ['id', 'report', 'bank_name', 'sanctioned_amount', 'interest_rate']
+
+
+# --- Serializer for Drawings (LLP/Proprietorship) ---
+class DrawingSerializer(serializers.ModelSerializer):
+    report = serializers.PrimaryKeyRelatedField(
+        queryset=FinancialReport.objects.all(), 
+        required=False
+    )
+    year_setting = serializers.PrimaryKeyRelatedField(
+        queryset=ReportYearSetting.objects.all()
+    )
+    
+    class Meta:
+        model = Drawing
+        fields = ['id', 'report', 'year_setting', 'name', 'amount']

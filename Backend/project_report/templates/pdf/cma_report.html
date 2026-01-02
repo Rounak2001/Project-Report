@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CMA Report - {{ report.company_name }}</title>
+    <style>
+        /* Base Styles */
+        @page {
+            size: A4 landscape;
+            margin: 1.5cm 2cm;
+
+            @bottom-center {
+                content: "Page " counter(page) " of " counter(pages);
+                font-size: 9px;
+                color: #666;
+            }
+
+            @top-right {
+                content: "{{ report.company_name }}";
+                font-size: 9px;
+                color: #666;
+            }
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-size: 11px;
+            line-height: 1.5;
+            color: #333;
+            background: white;
+            max-width: 100%;
+        }
+
+        /* Header Section */
+        .report-header {
+            text-align: center;
+            padding: 20px 0;
+            border-bottom: 3px solid #2563eb;
+            margin-bottom: 20px;
+        }
+
+        .report-header h1 {
+            font-size: 24px;
+            color: #1e40af;
+            margin-bottom: 8px;
+            font-weight: 700;
+        }
+
+        .report-header h2 {
+            font-size: 16px;
+            color: #4b5563;
+            font-weight: 500;
+        }
+
+        .report-header .subtitle {
+            font-size: 12px;
+            color: #6b7280;
+            margin-top: 8px;
+        }
+
+        .company-info {
+            margin-top: 15px;
+            font-size: 11px;
+            color: #4b5563;
+        }
+
+        /* Section Titles */
+        .section-title {
+            background: #2563eb;
+            color: white;
+            padding: 10px 15px;
+            font-size: 14px;
+            font-weight: 600;
+            margin: 25px 0 12px 0;
+            page-break-after: avoid;
+        }
+
+        .section-subtitle {
+            background: #e5e7eb;
+            color: #374151;
+            padding: 8px 15px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        /* Tables */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 20px;
+            font-size: 10px;
+        }
+
+        table th,
+        table td {
+            border: 1px solid #d1d5db;
+            padding: 8px 12px;
+            text-align: right;
+        }
+
+        table th {
+            background: #f3f4f6;
+            font-weight: 600;
+            color: #374151;
+            padding: 10px 12px;
+        }
+
+        table th:first-child,
+        table td:first-child {
+            text-align: left;
+            min-width: 220px;
+        }
+
+        table .row-header {
+            background: #1e40af;
+            color: white;
+            font-weight: 600;
+            text-align: left;
+        }
+
+        table .row-subheader {
+            background: #dbeafe;
+            color: #1e40af;
+            font-weight: 600;
+            text-align: left;
+        }
+
+        table .row-total {
+            background: #eff6ff;
+            font-weight: 600;
+        }
+
+        table .row-grandtotal {
+            background: #bfdbfe;
+            font-weight: 700;
+        }
+
+        /* Ratio Table Specific */
+        .ratio-table .ideal-range {
+            text-align: center;
+            font-size: 8px;
+            color: #6b7280;
+            width: 80px;
+        }
+
+        .ratio-table .good {
+            background: #dcfce7;
+        }
+
+        .ratio-table .warn {
+            background: #fef9c3;
+        }
+
+        .ratio-table .bad {
+            background: #fee2e2;
+        }
+
+        /* Page Break */
+        .page-break {
+            page-break-before: always;
+        }
+
+        /* Utility Classes */
+        .text-right {
+            text-align: right;
+        }
+
+        .text-left {
+            text-align: left;
+        }
+
+        .text-center {
+            text-align: center;
+        }
+
+        .bold {
+            font-weight: 600;
+        }
+
+        .currency {
+            font-family: 'Courier New', monospace;
+        }
+
+        /* Footer */
+        .footer-note {
+            margin-top: 30px;
+            padding-top: 10px;
+            border-top: 1px solid #e5e7eb;
+            font-size: 8px;
+            color: #6b7280;
+            text-align: center;
+        }
+
+        /* Indent for sub-items */
+        .indent-1 {
+            padding-left: 20px !important;
+        }
+
+        .indent-2 {
+            padding-left: 35px !important;
+        }
+    </style>
+</head>
+
+<body>
+    <!-- Report Header -->
+    <div class="report-header">
+        <h1>Credit Monitoring Arrangement (CMA) Report</h1>
+        <h2>{{ report.company_name }}</h2>
+        {% if report.address %}
+        <div class="company-info">{{ report.address }}</div>
+        {% endif %}
+        {% if report.gst_number %}
+        <div class="company-info">GSTIN: {{ report.gst_number }}</div>
+        {% endif %}
+        {% with last_year=year_settings|last %}
+        <div class="subtitle">
+            Financial Projection: {{ year_settings.0.year_display }} to {{ last_year.year_display }}
+        </div>
+        {% endwith %}
+    </div>
+
+    <!-- 1. OPERATING STATEMENT (P&L) -->
+    <div class="section-title">1. Operating Statement (Profit & Loss)</div>
+    <table>
+        <thead>
+            <tr>
+                <th>Particulars</th>
+                {% for year in year_settings %}
+                <th>{{ year.year_display }}</th>
+                {% endfor %}
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in operating_rows %}
+            <tr
+                class="{% if row.type == 'header' %}row-header{% elif row.type == 'subheader' %}row-subheader{% elif row.type == 'total' %}row-total{% elif row.type == 'grandtotal' %}row-grandtotal{% endif %}">
+                <td class="{% if row.indent %}indent-{{ row.indent }}{% endif %}">{{ row.label }}</td>
+                {% for value in row.values %}
+                <td class="currency">{{ value }}</td>
+                {% endfor %}
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <!-- Page Break -->
+    <div class="page-break"></div>
+
+    <!-- 2. BALANCE SHEET -->
+    <div class="section-title">2. Balance Sheet</div>
+
+    <!-- Assets Section -->
+    <div class="section-subtitle">ASSETS</div>
+    <table>
+        <thead>
+            <tr>
+                <th>Particulars</th>
+                {% for year in year_settings %}
+                <th>{{ year.year_display }}</th>
+                {% endfor %}
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in asset_rows %}
+            <tr
+                class="{% if row.type == 'header' %}row-subheader{% elif row.type == 'total' %}row-total{% elif row.type == 'grandtotal' %}row-grandtotal{% endif %}">
+                <td class="{% if row.indent %}indent-{{ row.indent }}{% endif %}">{{ row.label }}</td>
+                {% for value in row.values %}
+                <td class="currency">{{ value }}</td>
+                {% endfor %}
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <!-- Liabilities Section -->
+    <div class="section-subtitle">LIABILITIES</div>
+    <table>
+        <thead>
+            <tr>
+                <th>Particulars</th>
+                {% for year in year_settings %}
+                <th>{{ year.year_display }}</th>
+                {% endfor %}
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in liability_rows %}
+            <tr
+                class="{% if row.type == 'header' %}row-subheader{% elif row.type == 'total' %}row-total{% elif row.type == 'grandtotal' %}row-grandtotal{% endif %}">
+                <td class="{% if row.indent %}indent-{{ row.indent }}{% endif %}">{{ row.label }}</td>
+                {% for value in row.values %}
+                <td class="currency">{{ value }}</td>
+                {% endfor %}
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <!-- Page Break -->
+    <div class="page-break"></div>
+
+    <!-- 3. CASH FLOW STATEMENT -->
+    <div class="section-title">3. Cash Flow Statement</div>
+    <table>
+        <thead>
+            <tr>
+                <th>Particulars</th>
+                {% for year in cf_years %}
+                <th>{{ year.year_display }}</th>
+                {% endfor %}
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in cashflow_rows %}
+            <tr
+                class="{% if row.type == 'header' %}row-header{% elif row.type == 'subheader' %}row-subheader{% elif row.type == 'total' %}row-total{% elif row.type == 'grandtotal' %}row-grandtotal{% endif %}">
+                <td class="{% if row.indent %}indent-{{ row.indent }}{% endif %}">{{ row.label }}</td>
+                {% for value in row.values %}
+                <td class="currency">{{ value }}</td>
+                {% endfor %}
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <!-- Page Break -->
+    <div class="page-break"></div>
+
+    <!-- 4. LOAN SCHEDULE -->
+    <div class="section-title">4. Loan Schedule</div>
+    {% for loan in loan_schedules %}
+    <div class="section-subtitle">{{ loan.name }}</div>
+    <table>
+        <thead>
+            <tr>
+                <th>Particulars</th>
+                {% for summary in loan.summaries %}
+                <th>{{ summary.year_label }}</th>
+                {% endfor %}
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>Opening Balance</td>
+                {% for summary in loan.summaries %}
+                <td class="currency">{{ summary.opening }}</td>
+                {% endfor %}
+            </tr>
+            <tr>
+                <td>Interest</td>
+                {% for summary in loan.summaries %}
+                <td class="currency">{{ summary.interest }}</td>
+                {% endfor %}
+            </tr>
+            <tr>
+                <td>Principal Repayment</td>
+                {% for summary in loan.summaries %}
+                <td class="currency">{{ summary.principal }}</td>
+                {% endfor %}
+            </tr>
+            <tr class="row-total">
+                <td>Closing Balance</td>
+                {% for summary in loan.summaries %}
+                <td class="currency">{{ summary.closing }}</td>
+                {% endfor %}
+            </tr>
+        </tbody>
+    </table>
+    {% empty %}
+    <p style="color: #666; font-style: italic;">No loan schedule available.</p>
+    {% endfor %}
+
+    <!-- Page Break -->
+    <div class="page-break"></div>
+
+    <!-- 5. KEY FINANCIAL RATIOS -->
+    <div class="section-title">5. Key Financial Ratios</div>
+    <table class="ratio-table">
+        <thead>
+            <tr>
+                <th>Ratio</th>
+                <th class="ideal-range">Ideal Range</th>
+                {% for year in year_settings %}
+                <th>{{ year.year_display }}</th>
+                {% endfor %}
+            </tr>
+        </thead>
+        <tbody>
+            {% for category in ratio_categories %}
+            <tr class="row-header">
+                <td colspan="{{ year_settings|length|add:2 }}">{{ category.name }}</td>
+            </tr>
+            {% for ratio in category.ratios %}
+            <tr>
+                <td>{{ ratio.name }}</td>
+                <td class="ideal-range">{{ ratio.ideal }}</td>
+                {% for value in ratio.values %}
+                <td
+                    class="{% if value.status == 'good' %}good{% elif value.status == 'warn' %}warn{% else %}bad{% endif %}">
+                    {{ value.display }}
+                </td>
+                {% endfor %}
+            </tr>
+            {% endfor %}
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <!-- Legend -->
+    <div style="margin-top: 10px; font-size: 8px; color: #666;">
+        <span
+            style="display: inline-block; width: 12px; height: 12px; background: #dcfce7; border: 1px solid #ccc; margin-right: 3px;"></span>
+        Good
+        <span
+            style="display: inline-block; width: 12px; height: 12px; background: #fef9c3; border: 1px solid #ccc; margin-left: 15px; margin-right: 3px;"></span>
+        Caution
+        <span
+            style="display: inline-block; width: 12px; height: 12px; background: #fee2e2; border: 1px solid #ccc; margin-left: 15px; margin-right: 3px;"></span>
+        Needs Attention
+    </div>
+
+    <!-- Footer -->
+    <div class="footer-note">
+        This report is computer generated. Report generated on {% now "d M Y, H:i" %}.
+        <br>
+        For any queries, please contact the concerned financial institution.
+    </div>
+</body>
+
+</html>
