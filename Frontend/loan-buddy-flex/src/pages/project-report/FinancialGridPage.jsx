@@ -1869,7 +1869,7 @@ export function FinancialGridPage({ pageType, title }) {
                                             </div>
                                         </td>
                                         <td className="px-2 py-1 text-center border-r">
-                                            {row.name === 'Gross block' ? (
+                                            {row.name.toLowerCase() === 'gross block' ? (
                                                 <button
                                                     onClick={() => setIsAssetModalOpen(true)}
                                                     className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded hover:bg-blue-200"
