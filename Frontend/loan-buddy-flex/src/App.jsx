@@ -45,27 +45,30 @@ import ProjectReportApp from "@/pages/project-report/ProjectReportApp.jsx";
 
 const queryClient = new QueryClient();
 
-const App = () => (
-  <QueryClientProvider client={queryClient}>
-    <TooltipProvider>
-      <Toaster />
-      <Sonner />
-      <BrowserRouter>
-        <Routes>
-          <Route path="/" element={<Index />} />
-          <Route path="/existing" element={<Existing />} />
+const App = () => {
+  console.log("App component is mounting...");
+  return (
+    <QueryClientProvider client={queryClient}>
+      <TooltipProvider>
+        <Toaster />
+        <Sonner />
+        <BrowserRouter>
+          <Routes>
+            <Route path="/" element={<Index />} />
+            <Route path="/existing" element={<Existing />} />
 
-          {/* --- 2. ADD THE NEW ROUTE --- */}
-          {/* This tells React to render your Project Report app
-              for any URL that starts with /project-report */}
-          <Route path="/project-report/*" element={<ProjectReportApp />} />
+            {/* --- 2. ADD THE NEW ROUTE --- */}
+            {/* This tells React to render your Project Report app
+                for any URL that starts with /project-report */}
+            <Route path="/project-report/*" element={<ProjectReportApp />} />
 
-          {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
-          <Route path="*" element={<NotFound />} />
-        </Routes>
-      </BrowserRouter>
-    </TooltipProvider>
-  </QueryClientProvider>
-);
+            {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
+            <Route path="*" element={<NotFound />} />
+          </Routes>
+        </BrowserRouter>
+      </TooltipProvider>
+    </QueryClientProvider>
+  );
+};
 
 export default App;
