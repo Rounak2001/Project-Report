@@ -957,6 +957,79 @@ class FinancialDataViewSet(viewsets.GenericViewSet):
             {"status": "Cell saved", "id": data_point.id, "value": data_point.value},
             status=status.HTTP_200_OK
         )
+
+    @action(detail=False, methods=['post'])
+    def save_multiple_cells(self, request):
+        """
+        Batch save multiple cells in a single request.
+        Expected POST data:
+        {
+            "report_id": 1,
+            "cells": [
+                { "row_id": 123, "year_setting_id": 456, "value": 50000 },
+                ...
+            ]
+        }
+        """
+        report_id = request.data.get('report_id')
+        cells = request.data.get('cells', [])
+        
+        if not report_id or not cells:
+            return Response({"error": "report_id and cells list are required."}, status=status.HTTP_400_BAD_REQUEST)
+            
+        try:
+            report = FinancialReport.objects.get(id=report_id)
+        except FinancialReport.DoesNotExist:
+            return Response({"error": "Invalid report_id."}, status=status.HTTP_400_BAD_REQUEST)
+
+        updated_rows = set()
+        closing_row_names = [
+            "Closing Stock (Raw Materials)", 
+            "Closing Stock (Work-in-Process)", 
+            "Closing Stock (Finished Goods)",
+            "Closing Inventory"
+        ]
+        
+        for cell in cells:
+            try:
+                row = FinancialRow.objects.get(id=cell.get('row_id'))
+                year_setting = ReportYearSetting.objects.get(id=cell.get('year_setting_id'))
+                value = cell.get('value', 0)
+                
+                FinancialData.objects.update_or_create(
+                    row=row,
+                    year_setting=year_setting,
+                    defaults={'value': value}
+                )
+                updated_rows.add(row)
+                
+                if row.name in closing_row_names:
+                    opening_row_name = row.name.replace("Closing", "Opening")
+                    try:
+                        opening_row = FinancialRow.objects.get(group=row.group, name=opening_row_name)
+                        future_year_settings = ReportYearSetting.objects.filter(
+                            report=report,
+                            year__gt=year_setting.year
+                        )
+                        for future_year in future_year_settings:
+                            FinancialData.objects.update_or_create(
+                                row=opening_row,
+                                year_setting=future_year,
+                                defaults={'value': value}
+                            )
+                    except FinancialRow.DoesNotExist:
+                        pass
+                        
+            except (FinancialRow.DoesNotExist, ReportYearSetting.DoesNotExist):
+                continue
+        
+        self._populate_opening_stocks(report)
+        
+        updated_groups = {row.group for row in updated_rows}
+        for group in updated_groups:
+            self._calculate_group_totals(group, report)
+            
+        return Response({"status": f"Successfully saved {len(cells)} cells."}, status=status.HTTP_200_OK)
     
     def _calculate_group_totals(self, group, report):
         """Calculate and save totals for all total rows in a group"""

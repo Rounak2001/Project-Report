@@ -92,12 +92,12 @@ function ProjectReportApp() {
   }, [navigate]);
 
   // NEW: This function is called by grid pages to refresh data
+  // OPTIMIZED: Only fetch grid data, not the full report
   const reloadFinancialData = useCallback(async (reportId) => {
     setLoading(true);
     try {
-      // Re-fetch report AND grid data to ensure everything is in sync
-      const [report, yearSettings, opGroups, asGroups, liGroups, projectCosts] = await Promise.all([
-        apiClient.getReport(reportId),
+      // Re-fetch only grid data (not the report itself)
+      const [yearSettings, opGroups, asGroups, liGroups, projectCosts] = await Promise.all([
         apiClient.getYearSettings(reportId),
         apiClient.getGroups(reportId, 'operating'),
         apiClient.getGroups(reportId, 'asset'),
@@ -105,7 +105,6 @@ function ProjectReportApp() {
         apiClient.getProjectCosts(reportId)
       ]);
 
-      setCurrentReport(report);
       setAllFinancialData({
         yearSettings,
         operatingGroups: opGroups,

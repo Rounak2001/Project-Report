@@ -61,7 +61,7 @@ export const calculateTax = (pbt, regime) => {
     const total = tax + surcharge + cess;
     return { tax, surcharge, cess, total };
 };
-    
+
 /**
  * --- CORE CALCULATION ENGINE ---
  */
@@ -107,30 +107,43 @@ export const calculateAll = (allGroups, yearSettings, sector, taxRegime, loanSum
 
     }
 
+    // PRE-INDEXING for O(1) performance
+    const rowByNameIndex = new Map();
+    const groupByNameIndex = new Map(); // Exact name or tag
+    const cellValueIndex = new Map(); // key: `${rowId}_${yearId}`
+
+    allGroups.forEach(group => {
+        const groupNameLower = group.name.toLowerCase();
+        groupByNameIndex.set(groupNameLower, group);
+        if (group.system_tag) {
+            groupByNameIndex.set(group.system_tag.toLowerCase().replace(/\s+/g, '_'), group);
+        }
+
+        group.rows.forEach(row => {
+            const rowNameLower = row.name.toLowerCase();
+            rowByNameIndex.set(rowNameLower, row);
+
+            // Special handling for Capital-related searches
+            if (rowNameLower === 'ordinary share capital' || rowNameLower === 'share capital') {
+                rowByNameIndex.set('capital', row);
+            }
+
+            if (row.data && Array.isArray(row.data)) {
+                row.data.forEach(dp => {
+                    cellValueIndex.set(`${row.id}_${dp.year_setting}`, parseFloat(dp.value || 0));
+                });
+            }
+        });
+    });
+
     // Helper to get value from a specific row in a specific year
     const getVal = (yearId, key) => {
         // Check if it's already calculated
         if (results[yearId][key] !== undefined) return results[yearId][key];
 
-        const keyLower = key.toLowerCase();
-
-        // Search in groups
-        for (const group of allGroups) {
-            for (const row of group.rows) {
-                const rowLower = row.name.toLowerCase();
-
-                // Exact match first
-                if (rowLower === keyLower) {
-                    const dp = row.data.find(d => d.year_setting === yearId);
-                    return parseFloat(dp?.value || 0);
-                }
-
-                // Special handling for Capital-related searches (LLP/Proprietorship)
-                if (keyLower === 'capital' && (rowLower === 'ordinary share capital' || rowLower === 'share capital')) {
-                    const dp = row.data.find(d => d.year_setting === yearId);
-                    return parseFloat(dp?.value || 0);
-                }
-            }
+        const row = rowByNameIndex.get(key.toLowerCase());
+        if (row) {
+            return cellValueIndex.get(`${row.id}_${yearId}`) || 0;
         }
         return 0;
     };
@@ -138,47 +151,43 @@ export const calculateAll = (allGroups, yearSettings, sector, taxRegime, loanSum
     // Helper to sum a group dynamically
     const sumGroup = (yearId, groupNamePart, excludeNames = []) => {
         let sum = 0;
-        // Find group by name OR system_tag (for new template structure)
-        const group = allGroups.find(g =>
-            g.name.toLowerCase().includes(groupNamePart.toLowerCase()) ||
-            (g.system_tag && g.system_tag.toLowerCase().includes(groupNamePart.toLowerCase().replace(/\s+/g, '_')))
-        );
+        const gNameLower = groupNamePart.toLowerCase();
+
+        // Find group by name OR system_tag
+        // Since groupNamePart can be partial, we might still need a broad search if not in index
+        let group = groupByNameIndex.get(gNameLower) || groupByNameIndex.get(gNameLower.replace(/\s+/g, '_'));
+
+        if (!group) {
+            group = allGroups.find(g =>
+                g.name.toLowerCase().includes(gNameLower) ||
+                (g.system_tag && g.system_tag.toLowerCase().includes(gNameLower.replace(/\s+/g, '_')))
+            );
+        }
 
         if (group) {
+            const cleanExcludes = excludeNames.map(ex => ex.toLowerCase().replace(/[^a-z0-9]/g, ''));
+
             group.rows.forEach(row => {
                 // CRITICAL: Skip hidden rows from calculations
                 if (row.is_hidden) return;
 
-                // Ultra-robust exclusion
-                // Normalize name: remove all non-alphanumeric chars to handle hidden/special chars
                 const cleanName = row.name.toLowerCase().replace(/[^a-z0-9]/g, '');
 
-                const isExcluded = excludeNames.some(ex => cleanName.includes(ex.toLowerCase().replace(/[^a-z0-9]/g, '')))
-                    || cleanName.includes('depreciation') // changed from startsWith('depr') to includes('depreciation') on clean string
+                const isExcluded = cleanExcludes.some(ex => cleanName.includes(ex))
+                    || cleanName.includes('depreciation')
                     || cleanName.startsWith('depr')
                     || cleanName.includes('interest');
 
                 if (!isExcluded && !row.is_calculated && !row.is_total_row && !row.name.startsWith('=')) {
-                    const dp = row.data.find(d => d.year_setting === yearId);
-                    const val = parseFloat(dp?.value || 0);
-
-                    // Log included rows for debugging (only for first year to reduce noise)
-                    if (yearId === yearSettings[0]?.id && groupNamePart === "Selling" && val > 0) {
-
-                    }
-
+                    const val = cellValueIndex.get(`${row.id}_${yearId}`) || 0;
                     sum += isNaN(val) ? 0 : val;
-                } else if (yearId === yearSettings[0]?.id && groupNamePart === "Selling" && isExcluded) {
-
                 }
             });
         }
         return sum;
     };
 
-    // Helper to sum ALL groups of a given page_type (for accurate Total Assets/Liabilities)
-    // This ensures CFS and BS iterate over the EXACT same rows
-    // CRITICAL FIX: Added resultsObj parameter to prefer calculated values over raw input
+    // Helper to sum ALL groups of a given page_type
     const sumAllGroupsByPageType = (yearId, pageType, excludeSystemTags = ['total_assets', 'total_liabilities'], excludeRowNames = [], resultsObj = null) => {
         let sum = 0;
         const normalizedExcludes = excludeRowNames.map(n => n.toLowerCase().replace(/[^a-z0-9]/g, ''));
@@ -190,17 +199,14 @@ export const calculateAll = (allGroups, yearSettings, sector, taxRegime, loanSum
                     if (row.is_hidden || row.is_calculated || row.is_total_row) return;
                     if (row.name.startsWith('=')) return; // Skip formula rows
 
-                    // Skip rows that are injected/calculated elsewhere (Cash, Provision for Taxes, Term Loans, WC Loans)
                     const cleanName = row.name.toLowerCase().replace(/[^a-z0-9]/g, '');
                     if (normalizedExcludes.some(ex => cleanName.includes(ex))) return;
 
-                    // CRITICAL FIX: Prefer calculated value from results if available
                     let val = 0;
                     if (resultsObj && resultsObj[row.name] !== undefined) {
                         val = parseFloat(resultsObj[row.name] || 0);
                     } else {
-                        const dp = row.data.find(d => d.year_setting === yearId);
-                        val = parseFloat(dp?.value || 0);
+                        val = cellValueIndex.get(`${row.id}_${yearId}`) || 0;
                     }
                     sum += isNaN(val) ? 0 : val;
                 });

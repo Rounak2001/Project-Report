@@ -155,6 +155,14 @@ export const apiClient = {
   },
 
   /**
+   * Saves multiple cells in the grid in a single batch request.
+   */
+  saveMultipleCells: (batchData) => {
+    // batchData = { report_id, cells: [ { row_id, year_setting_id, value }, ... ] }
+    return request('/data/save_multiple_cells/', { method: 'POST', body: batchData });
+  },
+
+  /**
    * Runs the "GO" button projection automation on the backend.
    */
   runProjection: (rowId, projectionData) => {

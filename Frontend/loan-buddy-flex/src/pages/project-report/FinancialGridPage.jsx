@@ -24,19 +24,21 @@ function DataCell({ rowId, yearId, initialValue, onSave, row, yearSettings, onAu
 
     const handleBlur = async () => {
         const newValue = parseFloat(val) || 0;
-        if (newValue !== parseFloat(initialValue)) {
-            await onSave(rowId, yearId, newValue);
+        const oldValue = parseFloat(initialValue) || 0;
 
-            // Auto-project to future years if this is not the last year
-            // BUT SKIP for Opening/Closing Stock as they have specific carry-forward logic
-            // AND SKIP for General Reserve as it has custom calculation (PAT - Dividends)
-            const isStockRow = row.name.toLowerCase().includes('opening stock') || row.name.toLowerCase().includes('closing stock');
-            const isGeneralReserve = row.name === 'General reserve';
-            const currentYearIndex = yearSettings.findIndex(y => y.id === yearId);
+        // Only save if value actually changed
+        if (Math.abs(newValue - oldValue) < 0.001) return;
 
-            if (!isStockRow && !isGeneralReserve && currentYearIndex < yearSettings.length - 1 && newValue > 0) {
-                onAutoProject(row, currentYearIndex, newValue);
-            }
+        await onSave(rowId, yearId, newValue);
+
+        // Auto-project ONLY from the FIRST year (index 0) to avoid cascading projections
+        // AND skip for stock rows and general reserve
+        const isStockRow = row.name.toLowerCase().includes('opening stock') || row.name.toLowerCase().includes('closing stock');
+        const isGeneralReserve = row.name === 'General reserve';
+        const currentYearIndex = yearSettings.findIndex(y => y.id === yearId);
+
+        if (!isStockRow && !isGeneralReserve && currentYearIndex === 0 && newValue > 0) {
+            onAutoProject(row, currentYearIndex, newValue);
         }
     };
 
@@ -668,52 +670,46 @@ export function FinancialGridPage({ pageType, title }) {
             })
         }));
 
-        // Deep copy to avoid mutating state
-        const displayGroups = JSON.parse(JSON.stringify(visibleGroups));
+        // Efficient copy and custom visibility logic
+        const displayGroups = visibleGroups.map(group => {
+            const isOperating = pageType === 'operating';
+            const groupNameLower = group.name.toLowerCase();
 
-        // --- CUSTOM VISIBILITY & BLOCKING LOGIC ---
-        if (pageType === 'operating') {
-            displayGroups.forEach(group => {
-                group.rows.forEach(row => {
-                    // Block "Depreciation (Office Equipment)" as it is auto-calculated
-                    // Hide "Depreciation (Office Equipment)" as requested (Robust check)
+            return {
+                ...group,
+                rows: group.rows.map(row => {
                     const lowerName = row.name.toLowerCase();
-                    if (lowerName.includes("office equipment") && (lowerName.includes("depreciation") || lowerName.includes("depriciation"))) {
-                        row.is_hidden = true;
-                    }
-                    // Hide "Working Capital Interest" as it is replaced by split heads
-                    // AND Hide ANY interest row if it appears in "Selling" group (to avoid duplication)
-                    const groupName = group.name.toLowerCase();
-                    if (groupName.includes("selling") && lowerName.includes("interest")) {
-                        row.is_hidden = true;
-                    }
+                    let is_hidden = row.is_hidden || false;
 
-                    if (row.name.trim().toLowerCase() === "working capital interest") {
-                        row.is_hidden = true;
+                    if (isOperating) {
+                        // Block "Depreciation (Office Equipment)" as it is auto-calculated
+                        if (lowerName.includes("office equipment") && (lowerName.includes("depreciation") || lowerName.includes("depriciation"))) {
+                            is_hidden = true;
+                        }
+                        // Hide "Working Capital Interest" as it is replaced by split heads
+                        // AND Hide ANY interest row if it appears in "Selling" group (to avoid duplication)
+                        if (groupNameLower.includes("selling") && lowerName.includes("interest")) {
+                            is_hidden = true;
+                        }
+
+                        if (row.name.trim().toLowerCase() === "working capital interest") {
+                            is_hidden = true;
+                        }
+
+                        // Hide "Term Loan Interest" as it will be re-injected in the correct group
+                        if (row.name.trim().toLowerCase() === "term loan interest") {
+                            is_hidden = true;
+                        }
+
+                        // Hide "Provision for Taxes" in Operating Statement (User wants "Tax" instead)
+                        if (row.name.trim().toLowerCase() === "provision for taxes") {
+                            is_hidden = true;
+                        }
                     }
-
-                    // Hide "Term Loan Interest" as it will be re-injected in the correct group
-                    if (row.name.trim().toLowerCase() === "term loan interest") {
-                        row.is_hidden = true;
-                    }
-
-                    // Hide "Provision for Taxes" in Operating Statement (User wants "Tax" instead)
-                    if (row.name.trim().toLowerCase() === "provision for taxes") {
-                        row.is_hidden = true;
-                    }
-                    // Hide generic "Depreciation" if it exists (to avoid confusion)
-                    // if (row.name.trim() === "Depreciation") {
-                    //    row.is_hidden = true;
-                    // }
-
-
-                });
-            });
-            // Re-filter to remove newly hidden rows
-            displayGroups.forEach(group => {
-                group.rows = group.rows.filter(r => !r.is_hidden);
-            });
-        }
+                    return { ...row, is_hidden };
+                }).filter(r => !r.is_hidden)
+            };
+        });
 
         // --- INJECT CALCULATED ROWS ---
 
@@ -1679,17 +1675,24 @@ export function FinancialGridPage({ pageType, title }) {
             else return;
         }
 
-        // Standard handling
-        for (const year of futureYears) {
+        const cells = futureYears.map(year => {
             currentValue = currentValue * (1 + defaultGrowthRate / 100);
+            return {
+                row_id: finalRowId,
+                year_setting_id: year.id,
+                value: Math.round(currentValue * 100) / 100
+            };
+        });
+
+        if (cells.length > 0) {
             try {
-                await apiClient.saveCell({
+                await apiClient.saveMultipleCells({
                     report_id: currentReport.id,
-                    row_id: finalRowId,
-                    year_setting_id: year.id,
-                    value: Math.round(currentValue * 100) / 100
+                    cells: cells
                 });
-            } catch (e) { console.error(e); }
+            } catch (e) {
+                console.error(e);
+            }
         }
         await reloadFinancialData(currentReport.id);
     };
@@ -1709,7 +1712,6 @@ export function FinancialGridPage({ pageType, title }) {
 
     const handleSmartProject = async (rowId, percentage, baseRowName) => {
         // 1. Calculate latest results to get "Total Revenue" and other aggregates
-        // We need to reconstruct the groups for calculation
         const allGroups = [...operatingGroups, ...assetGroups, ...liabilityGroups];
 
         // Filter excluded rows logic (same as in useMemo) to ensure consistency
@@ -1726,24 +1728,18 @@ export function FinancialGridPage({ pageType, title }) {
         filteredGroups.push({ name: "Excluded Items", rows: excludedRows });
         const results = calculateAll(filteredGroups, yearSettings, currentReport?.sector, currentReport?.tax_regime || 'domestic_22', getAllLoanSummaries(), undefined, currentReport, projectCosts, existingWCLoans);
 
-        // 2. Iterate and Save
+        // 2. Iterate and Prepare Batch
+        const cells = [];
         for (const year of yearSettings) {
             let baseVal = 0;
 
-            // Case 1: Total Revenue (Calculated Aggregate)
             if (baseRowName === "Total Revenue" || baseRowName === "Total Sales") {
                 baseVal = results[year.id]["Total Revenue"] || 0;
-            }
-            // Case 2: Specific Input Row or Other Calculated Value
-            else {
-                // Try to find the row in allGroups (Input Data)
+            } else {
                 let foundRow = null;
                 for (const g of allGroups) {
-                    // Try exact match
                     foundRow = g.rows.find(r => r.name.trim().toLowerCase() === baseRowName.trim().toLowerCase());
                     if (foundRow) break;
-
-                    // Try partial match if exact fails (be careful with this)
                     if (!foundRow) {
                         foundRow = g.rows.find(r => r.name.toLowerCase().includes(baseRowName.toLowerCase()));
                         if (foundRow) break;
@@ -1753,26 +1749,28 @@ export function FinancialGridPage({ pageType, title }) {
                 if (foundRow) {
                     const dp = foundRow.data.find(d => d.year_setting === year.id);
                     baseVal = parseFloat(dp?.value || 0);
-                } else {
-                    // Fallback: Check results if it's a calculated alias (e.g. "Raw Material Consumed")
-                    if (results[year.id][baseRowName] !== undefined) {
-                        baseVal = results[year.id][baseRowName];
-                    } else {
-                        console.warn(`Base row / value "${baseRowName}" not found for year ${year.year_display}`);
-                    }
+                } else if (results[year.id][baseRowName] !== undefined) {
+                    baseVal = results[year.id][baseRowName];
                 }
             }
 
             const newVal = (baseVal * percentage) / 100;
+            cells.push({
+                row_id: rowId,
+                year_setting_id: year.id,
+                value: Math.round(newVal * 100) / 100
+            });
+        }
 
+        if (cells.length > 0) {
             try {
-                await apiClient.saveCell({
+                await apiClient.saveMultipleCells({
                     report_id: currentReport.id,
-                    row_id: rowId,
-                    year_setting_id: year.id,
-                    value: Math.round(newVal * 100) / 100
+                    cells: cells
                 });
-            } catch (e) { console.error(e); }
+            } catch (e) {
+                console.error(e);
+            }
         }
         await reloadFinancialData(currentReport.id);
     };
