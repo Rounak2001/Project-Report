@@ -138,6 +138,7 @@ CORS_ALLOWED_ORIGINS = [
     "http://127.0.0.1:3000",
     "http://localhost:3000", # Common dev port
     "https://project-report-maker.onrender.com", 
+    "https://project-report-1-lhw0.onrender.com",
 ]
 
 CORS_ALLOW_CREDENTIALS = True
