@@ -5,7 +5,6 @@ import { FullScreenLoader, Input, Select } from '@/components/common.jsx';
 
 // --- 1. HomePage (Dashboard) ---
 export function HomePage() {
-    console.log("HomePage mounting...");
     const { selectReport, setAppError } = useContext(AppContext);
     const [reports, setReports] = useState([]);
     const [loading, setLoading] = useState(true);
