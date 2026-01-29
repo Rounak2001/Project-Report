@@ -568,15 +568,22 @@ class FinancialReportViewSet(viewsets.ModelViewSet):
         
 
     def _create_wholesale_template(self, report):
-        """ Template for Wholesale sector businesses. """
+        """ Template for Wholesale/Trading sector businesses. 
+            Uses simplified COGS (Opening Inventory + Purchases - Closing Inventory)
+            but maintains full Balance Sheet structure for CMA compliance.
+        """
         # === 1. Operating Statement ===
+        
+        # --- Revenue Group ---
         g_revenue = FinancialGroup.objects.create(
             report=report, name="Revenue", page_type="operating", order=10,
             cf_bucket='operating', nature='pnl_income', system_tag='revenue'
         )
         FinancialRow.objects.create(group=g_revenue, name="Wholesale Revenue", order=10)
-        FinancialRow.objects.create(group=g_revenue, name="Total Revenue", order=20, is_calculated=True, is_total_row=True)
+        FinancialRow.objects.create(group=g_revenue, name="Export Revenue", order=20)
+        FinancialRow.objects.create(group=g_revenue, name="Total Revenue", order=30, is_calculated=True, is_total_row=True)
 
+        # --- COGS Group (SIMPLIFIED for Trading) ---
         g_cogs = FinancialGroup.objects.create(
             report=report, name="Cost of Goods Sold (COGS)", page_type="operating", order=20,
             cf_bucket='operating', nature='pnl_expense', system_tag='cogs'
@@ -587,76 +594,198 @@ class FinancialReportViewSet(viewsets.ModelViewSet):
         FinancialRow.objects.create(group=g_cogs, name="Closing Inventory", order=40)
         FinancialRow.objects.create(group=g_cogs, name="= Cost of Goods Sold", order=50, is_calculated=True, is_total_row=True)
 
+        # --- Selling, General & Administrative Expenses (SGA) ---
         g_sga = FinancialGroup.objects.create(
             report=report, name="Selling, General & Administrative Expenses", page_type="operating", order=30,
             cf_bucket='operating', nature='pnl_expense', system_tag='sga'
         )
         FinancialRow.objects.create(group=g_sga, name="Warehouse Rent & Utilities", order=10)
-        FinancialRow.objects.create(group=g_sga, name="Warehouse Staff Salaries", order=20)
+        FinancialRow.objects.create(group=g_sga, name="Staff Salaries", order=20)
         FinancialRow.objects.create(group=g_sga, name="Logistics & Freight-out", order=30)
-        FinancialRow.objects.create(group=g_sga, name="Sales Team Salaries & Commission", order=40)
-
-        # === 2. Balance Sheet - Assets ===
-        g_ca = FinancialGroup.objects.create(
-            report=report, name="Current Assets", page_type="asset", order=10,
-            cf_bucket='operating', nature='asset', system_tag='current_assets'
+        FinancialRow.objects.create(group=g_sga, name="Marketing & Advertising", order=40)
+        FinancialRow.objects.create(group=g_sga, name="Depreciation", order=50, system_tag='depreciation')
+        FinancialRow.objects.create(group=g_sga, name="Working Capital Interest", order=60)
+        FinancialRow.objects.create(group=g_sga, name="Term Loan Interest", order=70, is_calculated=True, system_tag='interest_total')
+        FinancialRow.objects.create(group=g_sga, name="Selling, General, and Admn. Exp. Total", order=80, is_calculated=True, is_total_row=True)
+        
+        # --- Taxes & Profit Appropriation ---
+        g_taxes = FinancialGroup.objects.create(
+            report=report, name="Taxes and Profit Appropriation", page_type="operating", order=40,
+            cf_bucket='operating', nature='pnl_expense', system_tag='taxes'
         )
-        FinancialRow.objects.create(group=g_ca, name="Cash & Bank Balance", order=10)
-        FinancialRow.objects.create(group=g_ca, name="Accounts Receivable", order=20)
-        FinancialRow.objects.create(group=g_ca, name="Inventory", order=30)
-        FinancialRow.objects.create(group=g_ca, name="Total Current Assets", order=40, is_calculated=True, is_total_row=True)
+        FinancialRow.objects.create(group=g_taxes, name="Profit Before Tax", order=10, is_calculated=True, system_tag='pbt')
+        FinancialRow.objects.create(group=g_taxes, name="Provision for taxes", order=20, system_tag='tax_provision_pnl')
+        FinancialRow.objects.create(group=g_taxes, name="Provision for deferred tax", order=30)
+        FinancialRow.objects.create(group=g_taxes, name="Prior year adjustment", order=40)
+        FinancialRow.objects.create(group=g_taxes, name="Profit After Tax (PAT)", order=50, is_calculated=True, system_tag='pat')
+        FinancialRow.objects.create(group=g_taxes, name="Equity / Dividend Paid Amount", order=60)
+        FinancialRow.objects.create(group=g_taxes, name="Dividend Tax including Surcharge", order=70)
 
+        
+        # === 2. Balance Sheet - ASSETS ===
+        
+        # --- Subgroup 1: Cash & Bank (CFS: SKIP - This is the Anchor/Result) ---
+        g_cash = FinancialGroup.objects.create(
+            report=report, name="Cash & Bank Balance", page_type="asset", order=10,
+            cf_bucket='cash_equivalent', nature='asset', system_tag='cash_bank_group'
+        )
+        FinancialRow.objects.create(group=g_cash, name="Cash in Hand", order=10, system_tag='cash_bank')
+        FinancialRow.objects.create(group=g_cash, name="Balance with Banks", order=20, system_tag='cash_bank')
+        FinancialRow.objects.create(group=g_cash, name="Total Cash & Bank", order=30, is_calculated=True, is_total_row=True)
+        
+        # --- Subgroup 2: Operating Current Assets (CFS: Operating - WC Delta) ---
+        g_oca = FinancialGroup.objects.create(
+            report=report, name="Operating Current Assets", page_type="asset", order=20,
+            cf_bucket='operating', nature='asset', system_tag='operating_current_assets'
+        )
+        # Inventory (Stock-in-Trade for Trading)
+        FinancialRow.objects.create(group=g_oca, name="Stock-in-Trade (Inventory)", order=10)
+        # Receivables (Sundry Debtors)
+        FinancialRow.objects.create(group=g_oca, name="Sundry Debtors", order=20)
+        FinancialRow.objects.create(group=g_oca, name="Export Receivables", order=30)
+        FinancialRow.objects.create(group=g_oca, name="Bills Receivable", order=40)
+        # Advances & Other CA
+        FinancialRow.objects.create(group=g_oca, name="Advance to Suppliers", order=50)
+        FinancialRow.objects.create(group=g_oca, name="Prepaid Expenses", order=60)
+        FinancialRow.objects.create(group=g_oca, name="GST Input Credit", order=70)
+        FinancialRow.objects.create(group=g_oca, name="Other Current Assets", order=80)
+        FinancialRow.objects.create(group=g_oca, name="Total Operating Current Assets", order=90, is_calculated=True, is_total_row=True)
+        
+        # --- Subgroup 3: Fixed Assets / CapEx (CFS: Investing) ---
         g_fa = FinancialGroup.objects.create(
-            report=report, name="Fixed Assets", page_type="asset", order=20,
-            cf_bucket='investing', nature='asset', system_tag='fixed_assets'
+            report=report, name="Fixed Assets (CapEx)", page_type="asset", order=30,
+            cf_bucket='investing', nature='asset', system_tag='fixed_assets_capex'
         )
-        FinancialRow.objects.create(group=g_fa, name="Warehouse Property", order=10)
-        FinancialRow.objects.create(group=g_fa, name="Warehouse Equipment (Racking, Forklifts)", order=20)
-        FinancialRow.objects.create(group=g_fa, name="Delivery Trucks", order=30)
-        FinancialRow.objects.create(group=g_fa, name="Office Equipment", order=40)
+        FinancialRow.objects.create(group=g_fa, name="Gross Block", order=10, is_calculated=True, system_tag='gross_block')
+        FinancialRow.objects.create(group=g_fa, name="Net Block", order=20, is_calculated=True, is_total_row=True, system_tag='net_block')
+        FinancialRow.objects.create(group=g_fa, name="Capital WIP", order=30, system_tag='capital_wip')
+        FinancialRow.objects.create(group=g_fa, name="Intangible Assets", order=40)
         FinancialRow.objects.create(group=g_fa, name="Total Fixed Assets", order=50, is_calculated=True, is_total_row=True)
 
-        # === 3. Balance Sheet - Liabilities ===
-        g_nw = FinancialGroup.objects.create(
-            report=report, name="Net Worth", page_type="liability", order=10,
-            cf_bucket='financing', nature='liability', system_tag='net_worth'
+        
+        # --- Subgroup 4: Non-Current Assets (CFS: Investing) ---
+        g_nca = FinancialGroup.objects.create(
+            report=report, name="Non-Current Assets", page_type="asset", order=40,
+            cf_bucket='investing', nature='asset', system_tag='non_current_assets'
         )
+        FinancialRow.objects.create(group=g_nca, name="Long Term Investments", order=10)
+        FinancialRow.objects.create(group=g_nca, name="Security Deposits", order=20)
+        FinancialRow.objects.create(group=g_nca, name="Other Non-Current Assets", order=30)
+        FinancialRow.objects.create(group=g_nca, name="Total Non-Current Assets", order=40, is_calculated=True, is_total_row=True)
+        
+        # --- Total Assets Row ---
+        g_total_assets = FinancialGroup.objects.create(
+            report=report, name="Total Assets", page_type="asset", order=99,
+            cf_bucket='skip', nature='asset', system_tag='total_assets'
+        )
+        FinancialRow.objects.create(group=g_total_assets, name="Total Assets", order=10, is_calculated=True, is_total_row=True)
+
+
+        # === 3. Balance Sheet - LIABILITIES ===
         
         is_llp_or_proprietorship = report.tax_regime in ['llp', 'proprietorship']
         
+        # --- Subgroup 1: Capital & Net Worth (CFS: Financing) ---
+        g_capital = FinancialGroup.objects.create(
+            report=report, name="Capital & Net Worth", page_type="liability", order=10,
+            cf_bucket='financing', nature='liability', system_tag='capital_net_worth'
+        )
         if is_llp_or_proprietorship:
-            FinancialRow.objects.create(group=g_nw, name="Capital", order=10)
-            FinancialRow.objects.create(group=g_nw, name="Drawings", order=15) # Added Drawings
-            FinancialRow.objects.create(group=g_nw, name="Share premium", order=20)
-            FinancialRow.objects.create(group=g_nw, name="Revaluation Reserves", order=40)
-            FinancialRow.objects.create(group=g_nw, name="Other reserve", order=50)
-            FinancialRow.objects.create(group=g_nw, name="Deffered Tax liability", order=60)
+            FinancialRow.objects.create(group=g_capital, name="Partner's Capital", order=10, system_tag='share_capital')
+            FinancialRow.objects.create(group=g_capital, name="Drawings", order=20, system_tag='drawings')
         else:
-            FinancialRow.objects.create(group=g_nw, name="Share Capital", order=10)
-            FinancialRow.objects.create(group=g_nw, name="Reserves & Surplus", order=20)
-            
-        FinancialRow.objects.create(group=g_nw, name="Total Net Worth", order=70, is_calculated=True, is_total_row=True)
+            FinancialRow.objects.create(group=g_capital, name="Share Capital", order=10, system_tag='share_capital')
+        FinancialRow.objects.create(group=g_capital, name="Share Premium", order=30)
+        FinancialRow.objects.create(group=g_capital, name="Total Capital", order=40, is_calculated=True, is_total_row=True)
         
-        g_tl = FinancialGroup.objects.create(
-            report=report, name="Term Liabilities", page_type="liability", order=20,
+        # --- Subgroup 2: Reserves & Surplus (CFS: SKIP - Managed via PAT) ---
+        g_reserves = FinancialGroup.objects.create(
+            report=report, name="Reserves & Surplus", page_type="liability", order=15,
+            cf_bucket='skip', nature='liability', system_tag='reserves_surplus'
+        )
+        FinancialRow.objects.create(group=g_reserves, name="General Reserve", order=10, system_tag='general_reserve')
+        FinancialRow.objects.create(group=g_reserves, name="Retained Earnings", order=20, is_calculated=True, system_tag='retained_earnings')
+        FinancialRow.objects.create(group=g_reserves, name="Revaluation Reserve", order=30)
+        FinancialRow.objects.create(group=g_reserves, name="Other Reserves", order=40)
+        FinancialRow.objects.create(group=g_reserves, name="Total Reserves", order=50, is_calculated=True, is_total_row=True)
+        
+        # --- Net Worth Total ---
+        g_nw_total = FinancialGroup.objects.create(
+            report=report, name="Total Net Worth", page_type="liability", order=16,
+            cf_bucket='skip', nature='liability', system_tag='net_worth_total'
+        )
+        FinancialRow.objects.create(group=g_nw_total, name="Total Net Worth", order=10, is_calculated=True, is_total_row=True)
+        
+        # --- Subgroup 3: WC Borrowings (CFS: Financing) ---
+        g_wc = FinancialGroup.objects.create(
+            report=report, name="WC Borrowings", page_type="liability", order=20,
+            cf_bucket='financing', nature='liability', system_tag='wc_borrowings'
+        )
+        FinancialRow.objects.create(group=g_wc, name="CC Limit (Applicant Bank)", order=10, system_tag='wc_borrowing')
+        FinancialRow.objects.create(group=g_wc, name="OD Limit (Other Bank)", order=20, system_tag='wc_borrowing')
+        FinancialRow.objects.create(group=g_wc, name="Short Term Borrowing from Others", order=30)
+        FinancialRow.objects.create(group=g_wc, name="Total WC Borrowings", order=40, is_calculated=True, is_total_row=True)
+        
+        # --- Subgroup 4: Term Liabilities (CFS: Financing) ---
+        g_term = FinancialGroup.objects.create(
+            report=report, name="Term Liabilities", page_type="liability", order=25,
             cf_bucket='financing', nature='liability', system_tag='term_liabilities'
         )
-        FinancialRow.objects.create(group=g_tl, name="Long-term Loans (Warehouse Mortgage)", order=10, is_calculated=True)
-        FinancialRow.objects.create(group=g_tl, name="Total Term Liabilities", order=20, is_calculated=True, is_total_row=True)
-
-        g_cl = FinancialGroup.objects.create(
-            report=report, name="Current Liabilities", page_type="liability", order=30,
-            cf_bucket='operating', nature='liability', system_tag='current_liabilities'
+        FinancialRow.objects.create(group=g_term, name="Term Loans (Banks & FIs)", order=10, is_calculated=True, system_tag='term_loan')
+        FinancialRow.objects.create(group=g_term, name="Unsecured Loans (Promoters)", order=20, system_tag='unsecured_loan')
+        FinancialRow.objects.create(group=g_term, name="Other Long Term Liabilities", order=30)
+        FinancialRow.objects.create(group=g_term, name="Total Term Liabilities", order=40, is_calculated=True, is_total_row=True)
+        
+        # --- Subgroup 5: Trade Payables (CFS: Operating) ---
+        g_trade = FinancialGroup.objects.create(
+            report=report, name="Trade Payables", page_type="liability", order=30,
+            cf_bucket='operating', nature='liability', system_tag='trade_payables'
         )
-        FinancialRow.objects.create(group=g_cl, name="Accounts Payable (to Suppliers)", order=10)
-        FinancialRow.objects.create(group=g_cl, name="Line of Credit (Inventory)", order=20, is_calculated=True)
-        FinancialRow.objects.create(group=g_cl, name="Total Current Liabilities", order=30, is_calculated=True, is_total_row=True)
+        FinancialRow.objects.create(group=g_trade, name="Sundry Creditors (Trade)", order=10)
+        FinancialRow.objects.create(group=g_trade, name="Bills Payable", order=20)
+        FinancialRow.objects.create(group=g_trade, name="Advance from Customers", order=30)
+        FinancialRow.objects.create(group=g_trade, name="Total Trade Payables", order=40, is_calculated=True, is_total_row=True)
+        
+        # --- Subgroup 6: Other Current Liabilities (CFS: Operating) ---
+        g_other_cl = FinancialGroup.objects.create(
+            report=report, name="Other Current Liabilities", page_type="liability", order=35,
+            cf_bucket='operating', nature='liability', system_tag='other_current_liabilities'
+        )
+        FinancialRow.objects.create(group=g_other_cl, name="Statutory Liabilities (GST/TDS/PF)", order=10)
+        FinancialRow.objects.create(group=g_other_cl, name="Outstanding Expenses", order=20)
+        FinancialRow.objects.create(group=g_other_cl, name="Current Maturity of LT Debt", order=30)
+        FinancialRow.objects.create(group=g_other_cl, name="Other Current Liabilities", order=40)
+        FinancialRow.objects.create(group=g_other_cl, name="Total Other Current Liabilities", order=50, is_calculated=True, is_total_row=True)
+        
+        # --- Subgroup 7: Provisions (CFS: Operating - Tax Paid calc) ---
+        g_provisions = FinancialGroup.objects.create(
+            report=report, name="Provisions", page_type="liability", order=40,
+            cf_bucket='operating', nature='liability', system_tag='provisions'
+        )
+        FinancialRow.objects.create(group=g_provisions, name="Provision for Taxes", order=10, system_tag='tax_provision_bs')
+        FinancialRow.objects.create(group=g_provisions, name="Provision for Expenses", order=20)
+        FinancialRow.objects.create(group=g_provisions, name="Total Provisions", order=30, is_calculated=True, is_total_row=True)
+        
+        # --- Subgroup 8: Non-Cash Liabilities (CFS: Operating - Add-back) ---
+        g_non_cash = FinancialGroup.objects.create(
+            report=report, name="Non-Cash Liabilities", page_type="liability", order=45,
+            cf_bucket='operating', nature='liability', system_tag='non_cash_liab'
+        )
+        FinancialRow.objects.create(group=g_non_cash, name="Deferred Tax Liability", order=10, system_tag='dtl')
+        FinancialRow.objects.create(group=g_non_cash, name="Total Non-Cash Liabilities", order=20, is_calculated=True, is_total_row=True)
+        
+        # --- Total Liabilities and Net Worth Row ---
+        g_total_liab = FinancialGroup.objects.create(
+            report=report, name="Total Liabilities and Net Worth", page_type="liability", order=99,
+            cf_bucket='skip', nature='liability', system_tag='total_liabilities'
+        )
+        FinancialRow.objects.create(group=g_total_liab, name="Total Liabilities and Net Worth", order=10, is_calculated=True, is_total_row=True)
 
 
     def _create_retail_template(self, report):
-        """ Template for Retail sector businesses. """
-        # (This is very similar to Wholesale, so we can just call that function)
-        # You can customize this later if needed
+        """ Template for Retail sector businesses. 
+            Retail uses the same structure as Wholesale (Trading).
+        """
         self._create_wholesale_template(report)
 
 # --- (End of FinancialReportViewSet) ---
@@ -838,6 +967,20 @@ class FinancialRowViewSet(viewsets.ModelViewSet):
             return Response(
                 {"error": "Invalid base_year, base_value, or percentage."},
                 status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # FIRST: Save the base year value itself!
+        # This was missing before - base year value was never persisted
+        base_year_setting = ReportYearSetting.objects.filter(
+            report=report,
+            year=base_year
+        ).first()
+        
+        if base_year_setting:
+            FinancialData.objects.update_or_create(
+                row=row,
+                year_setting=base_year_setting,
+                defaults={'value': round(base_value, 2)}
             )
 
         # Get all year columns *after* the base year
