@@ -238,76 +238,84 @@ export function PreviewPage() {
          })(),
          { type: 'calculated', label: 'Total Revenue', key: 'Total Revenue', isBold: true },
 
-         // B-E. COST OF GOODS SOLD (Single Group)
-         // All COGS items are in ONE group in backend
+         // B-E. COST OF GOODS SOLD (Sector-Aware Rendering)
+         // Manufacturing: Full structure (Raw Materials, Manufacturing Expenses, WIP, Finished Goods)
+         // Trading/Wholesale/Retail/Service: Simplified (Opening Inventory, Purchases, Closing Inventory)
          ...(() => {
+            const sector = currentReport?.sector;
+            const isManufacturing = sector === 'industry' || !sector;
             const cogsGroup = allGroups.find(g => g.name.toLowerCase().includes("cost of goods sold") || g.name.toLowerCase().includes("cogs"));
             const cogsRows = [];
 
             if (cogsGroup) {
-               // B. Raw Materials
-               cogsRows.push({ type: 'header', label: 'B. RAW MATERIAL CONSUMED' });
-               cogsGroup.rows.forEach(row => {
-                  // CRITICAL: Skip hidden rows
-                  if (row.is_hidden) return;
+               if (isManufacturing) {
+                  // === MANUFACTURING: Full COGS Structure ===
+                  // B. Raw Materials
+                  cogsRows.push({ type: 'header', label: 'B. RAW MATERIAL CONSUMED' });
+                  cogsGroup.rows.forEach(row => {
+                     if (row.is_hidden) return;
+                     const name = row.name.toLowerCase();
+                     if ((name.includes('stock') && name.includes('raw')) || name.includes('purchase') || name.includes('freight')) {
+                        if (!row.is_calculated && !row.is_total_row && !row.name.startsWith('=')) {
+                           cogsRows.push({ type: 'input', label: row.name, key: row.name });
+                        }
+                     }
+                  });
+                  cogsRows.push({ type: 'calculated', label: 'Raw Material Consumed', key: 'Raw Material Consumed', isBold: true });
 
-                  const name = row.name.toLowerCase();
-                  if ((name.includes('stock') && name.includes('raw')) || name.includes('purchase') || name.includes('freight')) {
+                  // C. Manufacturing
+                  cogsRows.push({ type: 'header', label: 'C. MANUFACTURING EXPENSES' });
+                  cogsGroup.rows.forEach(row => {
+                     if (row.is_hidden) return;
+                     const name = row.name.toLowerCase();
+                     const isStock = name.includes('stock') || name.includes('opening') || name.includes('closing');
+                     const isRM = name.includes('raw') || name.includes('purchase') || name.includes('freight');
+                     const isWIP = name.includes('work') && name.includes('process');
+                     const isFG = name.includes('finished');
+                     if (!isStock && !isRM && !isWIP && !isFG && !row.is_calculated && !row.is_total_row && !row.name.startsWith('=')) {
+                        cogsRows.push({ type: 'input', label: row.name, key: row.name });
+                     }
+                  });
+                  cogsRows.push({ type: 'calculated', label: 'Total Manufacturing Expenses', key: 'Total Manufacturing Expenses', isBold: true });
+                  cogsRows.push({ type: 'calculated', label: 'Gross Factory Cost', key: 'Gross Factory Cost', isBold: true });
+
+                  // D. WIP
+                  cogsRows.push({ type: 'header', label: 'D. WORK-IN-PROCESS (WIP)' });
+                  cogsGroup.rows.forEach(row => {
+                     if (row.is_hidden) return;
+                     const name = row.name.toLowerCase();
+                     if (name.includes('work') && name.includes('process')) {
+                        if (!row.is_calculated && !row.is_total_row && !row.name.startsWith('=')) {
+                           cogsRows.push({ type: 'input', label: row.name, key: row.name });
+                        }
+                     }
+                  });
+                  cogsRows.push({ type: 'calculated', label: 'Factory Cost of Goods Produced', key: 'Factory Cost of Goods Produced', isBold: true });
+
+                  // E. Finished Goods / COGS
+                  cogsRows.push({ type: 'header', label: 'E. COST OF GOODS SOLD (COGS)' });
+                  cogsGroup.rows.forEach(row => {
+                     if (row.is_hidden) return;
+                     const name = row.name.toLowerCase();
+                     if (name.includes('finished')) {
+                        if (!row.is_calculated && !row.is_total_row && !row.name.startsWith('=')) {
+                           cogsRows.push({ type: 'input', label: row.name, key: row.name });
+                        }
+                     }
+                  });
+                  cogsRows.push({ type: 'calculated', label: 'Cost of Goods Sold (COGS)', key: 'Cost of Goods Sold (COGS)', isBold: true });
+               } else {
+                  // === TRADING/WHOLESALE/RETAIL/SERVICE: Simplified COGS ===
+                  cogsRows.push({ type: 'header', label: 'B. COST OF GOODS SOLD' });
+                  cogsGroup.rows.forEach(row => {
+                     if (row.is_hidden) return;
+                     // Include all non-calculated, non-total rows (Opening, Purchases, Freight, Closing)
                      if (!row.is_calculated && !row.is_total_row && !row.name.startsWith('=')) {
                         cogsRows.push({ type: 'input', label: row.name, key: row.name });
                      }
-                  }
-               });
-               cogsRows.push({ type: 'calculated', label: 'Raw Material Consumed', key: 'Raw Material Consumed', isBold: true });
-
-               // C. Manufacturing
-               cogsRows.push({ type: 'header', label: 'C. MANUFACTURING EXPENSES' });
-               cogsGroup.rows.forEach(row => {
-                  // CRITICAL: Skip hidden rows
-                  if (row.is_hidden) return;
-
-                  const name = row.name.toLowerCase();
-                  const isStock = name.includes('stock') || name.includes('opening') || name.includes('closing');
-                  const isRM = name.includes('raw') || name.includes('purchase') || name.includes('freight');
-                  const isWIP = name.includes('work') && name.includes('process');
-                  const isFG = name.includes('finished');
-
-                  if (!isStock && !isRM && !isWIP && !isFG && !row.is_calculated && !row.is_total_row && !row.name.startsWith('=')) {
-                     cogsRows.push({ type: 'input', label: row.name, key: row.name });
-                  }
-               });
-               cogsRows.push({ type: 'calculated', label: 'Total Manufacturing Expenses', key: 'Total Manufacturing Expenses', isBold: true });
-               cogsRows.push({ type: 'calculated', label: 'Gross Factory Cost', key: 'Gross Factory Cost', isBold: true });
-
-               // D. WIP
-               cogsRows.push({ type: 'header', label: 'D. WORK-IN-PROCESS (WIP)' });
-               cogsGroup.rows.forEach(row => {
-                  // CRITICAL: Skip hidden rows
-                  if (row.is_hidden) return;
-
-                  const name = row.name.toLowerCase();
-                  if (name.includes('work') && name.includes('process')) {
-                     if (!row.is_calculated && !row.is_total_row && !row.name.startsWith('=')) {
-                        cogsRows.push({ type: 'input', label: row.name, key: row.name });
-                     }
-                  }
-               });
-               cogsRows.push({ type: 'calculated', label: 'Factory Cost of Goods Produced', key: 'Factory Cost of Goods Produced', isBold: true });
-
-               // E. Finished Goods / COGS
-               cogsRows.push({ type: 'header', label: 'E. COST OF GOODS SOLD (COGS)' });
-               cogsGroup.rows.forEach(row => {
-                  // CRITICAL: Skip hidden rows
-                  if (row.is_hidden) return;
-
-                  const name = row.name.toLowerCase();
-                  if (name.includes('finished')) {
-                     if (!row.is_calculated && !row.is_total_row && !row.name.startsWith('=')) {
-                        cogsRows.push({ type: 'input', label: row.name, key: row.name });
-                     }
-                  }
-               });
-               cogsRows.push({ type: 'calculated', label: 'Cost of Goods Sold (COGS)', key: 'Cost of Goods Sold (COGS)', isBold: true });
+                  });
+                  cogsRows.push({ type: 'calculated', label: 'Cost of Goods Sold (COGS)', key: 'Cost of Goods Sold (COGS)', isBold: true });
+               }
             }
 
             return cogsRows;
@@ -675,241 +683,228 @@ export function PreviewPage() {
          },
 
 
+
          // LIABILITIES & NET WORTH SECTION
          { type: 'section_header', label: 'LIABILITIES AND NET WORTH', colSpan: true },
 
-         // Current Liabilities - dynamically get ALL rows from the group
-         { type: 'group_header', label: 'Current Liabilities' },
+         // DYNAMICALLY RENDER ALL LIABILITY GROUPS (matching Financial Grid exactly)
          ...(() => {
-            const currentLiabilitiesGroup = liabilityGroups.find(g => g.name.toLowerCase().includes("current liabilities"));
             const rows = [];
-            if (currentLiabilitiesGroup) {
-               currentLiabilitiesGroup.rows.forEach(row => {
-                  // CRITICAL: Skip hidden rows
-                  if (row.is_hidden) return;
-
-                  const name = row.name.toLowerCase();
-                  // Exclude Provision for Taxes as it is explicitly added below
-                  if (!name.includes('provision for taxes') && !row.is_calculated && !row.is_total_row && !row.name.startsWith('=')) {
-                     rows.push({ type: 'input', label: row.name, key: row.name });
-                  }
-               });
-            }
-            return rows;
-         })(),
-         // Dynamic Existing WC Liability - shown under Current Liabilities for consistency with old behavior
-         // (These are short-term borrowings, so Current Liabilities is appropriate)
-         ...(existingWCLoans && existingWCLoans.length > 0
-            ? existingWCLoans.map(loan => ({
-               type: 'calculated',
-               label: `${loan.bank_name} WC Limit`,
-               key: `${loan.bank_name} WC Limit`
-            }))
-            : []  // No existing WC loans - don't show placeholder
-         ),
-         // NOTE: "Proposed Working Capital Limit" is now shown under "WC Borrowings" group (caught by dynamic catch-all)
-         // NOTE: "Provision for Taxes" is now shown under "Provisions" group (caught by dynamic catch-all)
-         { type: 'calculated', label: 'Total current liability', key: 'Total current liability', isBold: true },
-
-         // Term Liabilities - dynamically get ALL rows from the group
-         { type: 'group_header', label: 'Term Liabilities' },
-         ...(() => {
-            const termLiabilitiesGroup = liabilityGroups.find(g => g.name.toLowerCase().includes("term liabilities"));
-            const rows = [];
-            if (termLiabilitiesGroup) {
-               termLiabilitiesGroup.rows.forEach(row => {
-                  // CRITICAL: Skip hidden rows
-                  if (row.is_hidden) return;
-
-                  const name = row.name.toLowerCase();
-                  // Skip Term loans as it is shown explicitly below
-                  if (!name.includes('term loan') && !row.is_calculated && !row.is_total_row && !row.name.startsWith('=')) {
-                     rows.push({ type: 'input', label: row.name, key: row.name });
-                  }
-               });
-            }
-            return rows;
-         })(),
-
-         // Individual Loan Liabilities
-         ...existingLoans.map(loan => ({
-            type: 'calculated',
-            label: `${loan.loan_name} (Outstanding)`,
-            getValue: (yearId) => getLoanValue(loan, yearId, 'closing_balance')
-         })),
-         ...(loanScheduleData ? [{
-            type: 'calculated',
-            label: `${currentReport.new_loan_type === 'wc' ? 'New Working Capital' : 'New Term Loan'} (Outstanding)`,
-            getValue: (yearId) => getNewLoanValue(yearId, 'closing_balance')
-         }] : []),
-
-         // { type: 'calculated', label: 'Term loans (excluding installments for 1 year)', key: 'Term loans (excluding installments)' }, // REMOVED generic row
-
-         { type: 'calculated', label: 'Total term liabilities', key: 'Total term liabilities', isBold: true },
-
-         // Total Outside Liabilities
-         { type: 'calculated', label: 'Total outside liabilities', key: 'Total outside liabilities', isBold: true },
-
-         // Shareholders' Equity - dynamically get ALL rows from the group
-         // Shareholders' Equity - dynamically get ALL rows from the group
-         { type: 'group_header', label: 'Shareholders\' Equity (Net Worth)' },
-
-         ...(() => {
             const isLlpOrProprietorship = taxRegime === 'llp' || taxRegime === 'proprietorship';
-            const netWorthGroup = liabilityGroups.find(g => g.name.toLowerCase().includes("net worth") || g.name.toLowerCase().includes("shareholders"));
-            const rows = [];
+            const addedSpecialRows = new Set(); // Track special rows to avoid duplicates
 
-            if (isLlpOrProprietorship) {
-               // --- LLP / PROPRIETORSHIP ---
-               // 1. Capital (Calculated Waterfall - Year 1: user input, Year 2+: prev Net Worth)
-               rows.push({
-                  type: 'calculated',
-                  label: 'Capital',
-                  key: 'Capital',
-                  getValue: (yearId) => {
-                     // First check calculations object
-                     const calcVal = calculations[yearId]?.["Capital"] ||
-                        calculations[yearId]?.["Ordinary share capital"] || 0;
-                     if (calcVal !== 0) return calcVal;
+            // Sort groups by order
+            const sortedGroups = [...liabilityGroups].sort((a, b) => (a.order || 0) - (b.order || 0));
 
-                     // Fallback: Check row data directly (for Year 1 where it's user input)
-                     if (netWorthGroup) {
-                        const capitalRow = netWorthGroup.rows.find(r =>
-                           r.name.toLowerCase() === 'capital' ||
-                           r.name.toLowerCase() === 'ordinary share capital'
-                        );
-                        if (capitalRow) {
-                           const dp = capitalRow.data.find(d => d.year_setting === yearId);
-                           return parseFloat(dp?.value || 0);
+            sortedGroups.forEach(group => {
+               // Skip total groups (they'll be shown as calculated rows)
+               if (group.system_tag?.includes('total')) return;
+
+               const groupNameLower = group.name.toLowerCase();
+               const isNetWorthGroup = groupNameLower.includes('capital') ||
+                  groupNameLower.includes('net worth') ||
+                  groupNameLower.includes('shareholders');
+
+               // FOR LLP/PROPRIETORSHIP: Build Capital & Net Worth section from CALCULATED values ONLY
+               // This bypasses grid row iteration to ensure waterfall values are used
+               if (isLlpOrProprietorship && isNetWorthGroup && !addedSpecialRows.has('llp_net_worth_group')) {
+                  addedSpecialRows.add('llp_net_worth_group');
+
+                  // Add group header
+                  rows.push({ type: 'group_header', label: 'CAPITAL & NET WORTH' });
+
+                  // 1. Capital (Opening) - from waterfall calculation
+                  rows.push({
+                     type: 'calculated',
+                     label: 'Share Capital',
+                     key: 'Share Capital',
+                     getValue: (yearId) => {
+                        // Must use Capital key which has the waterfall value
+                        return calculations[yearId]?.["Capital"] ||
+                           calculations[yearId]?.["Share Capital"] ||
+                           calculations[yearId]?.["Ordinary share capital"] || 0;
+                     }
+                  });
+
+                  // 2. Less: Drawings - show as negative
+                  rows.push({
+                     type: 'calculated',
+                     label: 'Less: Drawings',
+                     key: 'Drawings',
+                     getValue: (yearId) => {
+                        const val = calculations[yearId]?.["Drawings"] || 0;
+                        return val !== 0 ? -val : 0;
+                     }
+                  });
+
+                  // 3. Total Capital = Capital - Drawings (computed inline for display)
+                  rows.push({
+                     type: 'calculated',
+                     label: 'Total Capital',
+                     key: 'Total Capital',
+                     isBold: true,
+                     getValue: (yearId) => {
+                        const capital = calculations[yearId]?.["Capital"] || 0;
+                        const drawings = calculations[yearId]?.["Drawings"] || 0;
+                        return capital - drawings;
+                     }
+                  });
+
+                  // Add RESERVES & SURPLUS group header
+                  rows.push({ type: 'group_header', label: 'RESERVES & SURPLUS' });
+
+                  // 4. Add: General Reserve (PAT) - current year PAT
+                  rows.push({
+                     type: 'calculated',
+                     label: 'Add: General Reserve (PAT)',
+                     key: 'General Reserve (PAT)',
+                     getValue: (yearId) => {
+                        return calculations[yearId]?.["General Reserve (PAT)"] ||
+                           calculations[yearId]?.["Profit After Tax (PAT)"] || 0;
+                     }
+                  });
+
+                  // 5. Retained Earnings (cumulative - for display, usually 0 for LLP)
+                  rows.push({
+                     type: 'calculated',
+                     label: 'Retained Earnings',
+                     key: 'Retained Earnings',
+                     getValue: (yearId) => {
+                        return calculations[yearId]?.["Retained Earnings"] || 0;
+                     }
+                  });
+
+                  // 6. Total Reserves = General Reserve (PAT) for LLP
+                  rows.push({
+                     type: 'calculated',
+                     label: 'Total Reserves',
+                     key: 'Total Reserves',
+                     isBold: true,
+                     getValue: (yearId) => {
+                        return calculations[yearId]?.["Total Reserves"] ||
+                           calculations[yearId]?.["General Reserve (PAT)"] || 0;
+                     }
+                  });
+
+                  // 7. Total Net Worth = Total Capital + Total Reserves (final total)
+                  rows.push({
+                     type: 'calculated',
+                     label: 'Total Net Worth',
+                     key: 'Total Net Worth',
+                     isBold: true,
+                     highlight: true,
+                     getValue: (yearId) => {
+                        return calculations[yearId]?.["Total Net Worth"] ||
+                           calculations[yearId]?.["Net Worth"] || 0;
+                     }
+                  });
+
+                  return; // Skip processing individual rows in this group
+               }
+
+               // FOR OTHER GROUPS (Current Liabilities, Term Liabilities, etc.) 
+               // or FOR DOMESTIC COMPANY - process normally
+               if (isNetWorthGroup && isLlpOrProprietorship) {
+                  return; // Already handled above
+               }
+
+               // Add group header
+               rows.push({ type: 'group_header', label: group.name.toUpperCase() });
+
+               // Process each row in the group
+               group.rows.forEach(row => {
+                  if (row.is_hidden) return; // Skip hidden rows
+                  if (row.name.startsWith('=')) return; // Skip formula rows
+
+                  const rowNameLower = row.name.toLowerCase().trim();
+
+                  // Special handling for calculated rows (totals, General Reserve, etc.)
+                  if (row.is_calculated || row.is_total_row) {
+                     // These are calculated values - get from calculations object OR sum group rows
+                     rows.push({
+                        type: 'calculated',
+                        label: row.name,
+                        key: row.name,
+                        isBold: row.is_total_row,
+                        getValue: (yearId) => {
+                           const rowNameLower = row.name.toLowerCase().trim();
+
+                           // Check multiple possible key formats in calculations
+                           const possibleKeys = [
+                              row.name,
+                              row.name.toLowerCase(),
+                              row.name.replace(/\s+/g, ' ').trim(),
+                           ];
+                           for (const key of possibleKeys) {
+                              if (calculations[yearId]?.[key] !== undefined && calculations[yearId][key] !== 0) {
+                                 return calculations[yearId][key];
+                              }
+                           }
+
+                           // If not in calculations, sum the group's non-total rows dynamically
+                           if (row.is_total_row) {
+                              let sum = 0;
+                              group.rows.forEach(r => {
+                                 if (r.is_hidden || r.is_total_row || r.name.startsWith('=')) return;
+                                 const calcVal = calculations[yearId]?.[r.name];
+                                 if (calcVal !== undefined) {
+                                    sum += parseFloat(calcVal) || 0;
+                                 } else {
+                                    const dp = r.data?.find(d => d.year_setting === yearId);
+                                    sum += parseFloat(dp?.value || 0);
+                                 }
+                              });
+                              return sum;
+                           }
+
+                           return 0;
                         }
-                     }
-                     return 0;
+                     });
+                     return;
                   }
-               });
 
-               // 2. Add: General Reserve (PAT)
-               rows.push({ type: 'calculated', label: 'Add: General Reserve (PAT)', key: 'General Reserve (PAT)' });
-
-               // 3. Less: Drawings (user input, projected)
-               rows.push({
-                  type: 'calculated',
-                  label: 'Less: Drawings',
-                  key: 'Drawings',
-                  getValue: (yearId) => {
-                     // Check calculations first
-                     const calcVal = calculations[yearId]?.["Drawings"] || 0;
-                     if (calcVal !== 0) return -calcVal; // Show as negative (Less)
-
-                     // Fallback: Check row data directly
-                     if (netWorthGroup) {
-                        const drawingsRow = netWorthGroup.rows.find(r => r.name.toLowerCase() === 'drawings');
-                        if (drawingsRow) {
-                           const dp = drawingsRow.data.find(d => d.year_setting === yearId);
-                           return -parseFloat(dp?.value || 0); // Show as negative
-                        }
+                  // For Domestic Company: Special handling for Share Capital, Reserves, etc.
+                  if (!isLlpOrProprietorship) {
+                     // General Reserve for Domestic Company
+                     if (rowNameLower.includes('general reserve') && !addedSpecialRows.has('general_reserve')) {
+                        addedSpecialRows.add('general_reserve');
+                        rows.push({
+                           type: 'calculated',
+                           label: row.name,
+                           key: row.name,
+                           getValue: (yearId) => {
+                              return calculations[yearId]?.["General reserve"] ||
+                                 calculations[yearId]?.["Reserves"] ||
+                                 calculations[yearId]?.["Retained Earnings"] || 0;
+                           }
+                        });
+                        return;
+                     } else if (rowNameLower.includes('general reserve')) {
+                        return; // Skip duplicate
                      }
-                     return 0;
                   }
+
+                  // Regular input row - get from grid data
+                  rows.push({ type: 'input', label: row.name, key: row.name });
                });
-
-               // 4. Other Reserves (Input)
-               if (netWorthGroup) {
-                  netWorthGroup.rows.forEach(row => {
-                     if (row.is_hidden) return;
-                     const name = row.name.toLowerCase();
-                     // Exclude Capital, Drawings, General Reserve as they are handled explicitly
-                     if (!name.includes('capital') && !name.includes('drawings') && !name.includes('general reserve') && !row.is_calculated && !row.is_total_row && !row.name.startsWith('=')) {
-                        rows.push({ type: 'input', label: row.name, key: row.name });
-                     }
-                  });
-               }
-            } else {
-               // --- DOMESTIC COMPANY ---
-               // 1. Share Capital (Input)
-               if (netWorthGroup) {
-                  netWorthGroup.rows.forEach(row => {
-                     if (row.is_hidden) return;
-                     const name = row.name.toLowerCase();
-                     if (name.includes('share capital') && !row.is_calculated && !row.is_total_row) {
-                        rows.push({ type: 'input', label: row.name, key: row.name });
-                     }
-                  });
-               }
-
-               // 2. Reserves & Surplus (Group Header)
-               rows.push({ type: 'header', label: 'Reserves & Surplus' });
-
-               // 3. General Reserve (Calculated)
-               rows.push({ type: 'calculated', label: 'General reserve', key: 'General reserve' });
-
-               // 4. Other Reserves (Input)
-               if (netWorthGroup) {
-                  netWorthGroup.rows.forEach(row => {
-                     if (row.is_hidden) return;
-                     const name = row.name.toLowerCase();
-                     // Exclude Share Capital and General Reserve
-                     if (!name.includes('share capital') && !name.includes('general reserve') && !row.is_calculated && !row.is_total_row && !row.name.startsWith('=')) {
-                        rows.push({ type: 'input', label: row.name, key: row.name });
-                     }
-                  });
-               }
-            }
-            return rows;
-         })(),
-
-         { type: 'calculated', label: 'Total Net Worth', key: 'Total Net Worth', isBold: true },
-
-         // OTHER LIABILITIES - Catch-all for any liability rows with values not handled above
-         ...(() => {
-            // Groups already explicitly handled above - use EXACT matching to avoid skipping valid subgroups
-            // e.g., "Other Current Liabilities" should NOT be skipped even though it contains "current liabilities"
-            const handledGroupExactNames = [
-               'current liabilities',       // Handled explicitly above
-               'term liabilities',          // Handled explicitly above
-               'capital & net worth',       // Handled in LLP section (for LLP/Proprietorship)
-               "shareholders' equity (net worth)", // Handled in domestic section
-               "shareholders' equity",
-               "net worth",
-            ];
-            const handledRowNames = ['total current liability', 'total term liabilities',
-               'total outside liabilities', 'total net worth', 'total liabilities', 'total reserves',
-               'capital', 'drawings', 'general reserve'];
-
-            const rows = [];
-
-            liabilityGroups.forEach(group => {
-               const groupLower = group.name.toLowerCase();
-
-               // Skip groups with EXACT name match only (not partial includes)
-               if (handledGroupExactNames.includes(groupLower)) return;
-
-               // Check if this group has any rows with values
-               const rowsWithValues = group.rows.filter(row => {
-                  if (row.is_hidden || row.is_calculated || row.is_total_row || row.name.startsWith('=')) return false;
-                  const nameLower = row.name.toLowerCase();
-                  if (handledRowNames.some(h => nameLower.includes(h))) return false;
-
-                  // Check if row has any non-zero values
-                  const hasValue = row.data?.some(d => parseFloat(d.value || 0) !== 0) ||
-                     yearSettings.some(y => (calculations[y.id]?.[row.name] || 0) !== 0);
-                  return hasValue;
-               });
-
-               if (rowsWithValues.length > 0) {
-                  // Add group header using the actual group name from liability section
-                  rows.push({ type: 'group_header', label: group.name });
-
-                  rowsWithValues.forEach(row => {
-                     rows.push({ type: 'input', label: row.name, key: row.name });
-                  });
-               }
             });
 
             return rows;
          })(),
 
-         // Total Liabilities and Net Worth
-         { type: 'calculated', label: 'TOTAL LIABILITIES AND NET WORTH', key: 'Total liabilities', isBold: true, highlight: true },
+         // TOTAL LIABILITIES AND NET WORTH - calculated
+         {
+            type: 'calculated',
+            label: 'TOTAL LIABILITIES AND NET WORTH',
+            key: 'Total Liabilities',
+            isBold: true,
+            highlight: true,
+            getValue: (yearId) => {
+               return calculations[yearId]?.["Total Liabilities"] ||
+                  calculations[yearId]?.["Total liabilities"] ||
+                  calculations[yearId]?.["Total Liabilities and Net Worth"] || 0;
+            }
+         },
 
          // Balance Sheet Check
          { type: 'validation', label: 'BALANCE SHEET CHECK (Assets - Liabilities)', key: 'Balance Sheet Check', isBold: true, highlight: true },
@@ -1320,7 +1315,20 @@ export function PreviewPage() {
                         const deltaKeys = new Set();
                         yearSettings.forEach(year => {
                            const deltas = calculations[year.id]?._financingDeltas || [];
-                           deltas.forEach(d => deltaKeys.add(d.name));
+                           deltas.forEach(d => {
+                              // Filter out redundant deltas that are already explicitly handled
+                              const nameLower = d.name.toLowerCase();
+                              const isRedundant = nameLower.includes('share capital') ||
+                                 nameLower.includes('ordinary share capital') ||
+                                 nameLower.includes('drawings') ||
+                                 nameLower.includes('term loan') ||
+                                 nameLower.includes('wc limit') ||
+                                 nameLower.includes('working capital');
+
+                              if (!isRedundant) {
+                                 deltaKeys.add(d.name);
+                              }
+                           });
                         });
 
                         return Array.from(deltaKeys).map(name => (

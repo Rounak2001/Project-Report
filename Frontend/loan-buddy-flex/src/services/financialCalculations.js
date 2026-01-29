@@ -124,8 +124,15 @@ export const calculateAll = (allGroups, yearSettings, sector, taxRegime, loanSum
             rowByNameIndex.set(rowNameLower, row);
 
             // Special handling for Capital-related searches
-            if (rowNameLower === 'ordinary share capital' || rowNameLower === 'share capital') {
+            // IMPORTANT: Don't overwrite 'capital' if it already exists (e.g., actual "Capital" row)
+            if ((rowNameLower === 'ordinary share capital' || rowNameLower === 'share capital') && !rowByNameIndex.has('capital')) {
                 rowByNameIndex.set('capital', row);
+            }
+
+            // Special handling for Drawings - handle variations like "Less: Drawings"
+            // IMPORTANT: Don't overwrite 'drawings' if it already exists
+            if (rowNameLower.includes('drawings') && !rowByNameIndex.has('drawings')) {
+                rowByNameIndex.set('drawings', row);
             }
 
             if (row.data && Array.isArray(row.data)) {
@@ -141,6 +148,16 @@ export const calculateAll = (allGroups, yearSettings, sector, taxRegime, loanSum
         // Check if it's already calculated
         if (results[yearId][key] !== undefined) return results[yearId][key];
 
+        const row = rowByNameIndex.get(key.toLowerCase());
+        if (row) {
+            return cellValueIndex.get(`${row.id}_${yearId}`) || 0;
+        }
+        return 0;
+    };
+
+    // Helper to get GRID value ONLY (bypasses results cache)
+    // Use this when you need the original grid value, not a calculated one
+    const getGridVal = (yearId, key) => {
         const row = rowByNameIndex.get(key.toLowerCase());
         if (row) {
             return cellValueIndex.get(`${row.id}_${yearId}`) || 0;
@@ -258,109 +275,155 @@ export const calculateAll = (allGroups, yearSettings, sector, taxRegime, loanSum
         results[yId]["Total Revenue"] = totalRevenue;
         results[yId]["Total Sales"] = totalRevenue; // Alias
 
-        // B. COST OF GOODS SOLD (COGS)
+        // B. COST OF GOODS SOLD (COGS) - SECTOR-AWARE
+        const isManufacturing = sector === 'industry' || !sector;
         const cogsGroup = allGroups.find(g => g.name.toLowerCase().includes("cost of goods sold") || g.name.toLowerCase().includes("cogs"));
 
+        let cogs = 0;
         let openStockRM = 0, closeStockRM = 0, purchasesRM = 0, otherRMCosts = 0;
         let manufacturingExpenses = 0;
         let openWIP = 0, closeWIP = 0;
         let openFG = 0, closeFG = 0;
+        // For Trading: simplified inventory
+        let openingInventory = 0, closingInventory = 0, purchases = 0, freightIn = 0;
 
         if (cogsGroup) {
-            cogsGroup.rows.forEach(row => {
-                // CRITICAL: Skip hidden rows from calculations
-                if (row.is_hidden) return;
+            if (isManufacturing) {
+                // === MANUFACTURING: Full COGS Calculation ===
+                cogsGroup.rows.forEach(row => {
+                    if (row.is_hidden) return;
 
-                if (!row.is_calculated && !row.is_total_row && !row.name.startsWith('=')) {
-                    const dp = row.data.find(d => d.year_setting === yId);
-                    const value = parseFloat(dp?.value || 0);
-                    const name = row.name.toLowerCase();
+                    if (!row.is_calculated && !row.is_total_row && !row.name.startsWith('=')) {
+                        const dp = row.data.find(d => d.year_setting === yId);
+                        const value = parseFloat(dp?.value || 0);
+                        const name = row.name.toLowerCase();
 
-                    // Smart categorization
-                    if (name.includes('opening') && name.includes('stock') && name.includes('raw')) {
-                        // PRIORITY 1: Check if GPR mode forced a specific opening stock
-                        if (results[yId]?.["_forced_opening_stock_rm"] !== undefined) {
-                            openStockRM = results[yId]["_forced_opening_stock_rm"];
+                        // Smart categorization for Manufacturing
+                        if (name.includes('opening') && name.includes('stock') && name.includes('raw')) {
+                            if (results[yId]?.["_forced_opening_stock_rm"] !== undefined) {
+                                openStockRM = results[yId]["_forced_opening_stock_rm"];
+                            } else if (yearIndex > 0) {
+                                openStockRM = prevYearResults?.["Closing Stock (Raw Materials)"] || value;
+                            } else {
+                                openStockRM = value;
+                            }
+                            results[yId][row.name] = openStockRM;
+                            results[yId]["Opening Stock (Raw Materials)"] = openStockRM;
+                        } else if (name.includes('closing') && name.includes('stock') && name.includes('raw')) {
+                            closeStockRM = value;
+                        } else if (name.includes('purchase') && name.includes('raw')) {
+                            purchasesRM += value;
+                        } else if (name.includes('freight') && name.includes('in')) {
+                            otherRMCosts += value;
+                        } else if (name.includes('opening') && name.includes('work') && name.includes('process')) {
+                            openWIP = yearIndex === 0 ? value : (prevYearResults?.["Closing Stock (Work-in-Process)"] || value);
+                        } else if (name.includes('closing') && name.includes('work') && name.includes('process')) {
+                            closeWIP = value;
+                        } else if (name.includes('opening') && name.includes('finished')) {
+                            openFG = yearIndex === 0 ? value : (prevYearResults?.["Closing Stock (Finished Goods)"] || value);
+                        } else if (name.includes('closing') && name.includes('finished')) {
+                            closeFG = value;
+                        } else {
+                            manufacturingExpenses += value;
                         }
-                        // PRIORITY 2: Standard Waterfall (if Year > 0)
-                        else if (yearIndex > 0) {
-                            openStockRM = prevYearResults?.["Closing Stock (Raw Materials)"] || value;
-                        }
-                        // PRIORITY 3: Year 0 Input
-                        else {
-                            openStockRM = value;
-                        }
-                        results[yId][row.name] = openStockRM;
-                        results[yId]["Opening Stock (Raw Materials)"] = openStockRM;
+                    }
+                });
 
-                    } else if (name.includes('closing') && name.includes('stock') && name.includes('raw')) {
-                        closeStockRM = value;
-                    } else if (name.includes('purchase') && name.includes('raw')) {
-                        purchasesRM += value;
-                    } else if (name.includes('freight') && name.includes('in')) {
-                        otherRMCosts += value;
-                    } else if (name.includes('opening') && name.includes('work') && name.includes('process')) {
-                        openWIP = yearIndex === 0 ? value : (prevYearResults?.["Closing Stock (Work-in-Process)"] || value);
-                    } else if (name.includes('closing') && name.includes('work') && name.includes('process')) {
-                        closeWIP = value;
-                    } else if (name.includes('opening') && name.includes('finished')) {
-                        openFG = yearIndex === 0 ? value : (prevYearResults?.["Closing Stock (Finished Goods)"] || value);
-                    } else if (name.includes('closing') && name.includes('finished')) {
-                        closeFG = value;
+                // GPR Logic (Manufacturing only)
+                if (gprSettings?.enabled && totalRevenue > 0) {
+                    let targetGPR = 0;
+                    if (yearIndex === 0) {
+                        const actualRMConsumed = openStockRM + purchasesRM + otherRMCosts - closeStockRM;
+                        const actualGrossFactoryCost = actualRMConsumed + manufacturingExpenses;
+                        const actualFactoryCostProduced = actualGrossFactoryCost + openWIP - closeWIP;
+                        const actualCOGS = actualFactoryCostProduced + openFG - closeFG;
+                        const actualGrossProfit = totalRevenue - actualCOGS;
+                        const actualGPR = (actualGrossProfit / totalRevenue) * 100;
+                        results[yId]["_actual_gpr"] = actualGPR;
                     } else {
-                        manufacturingExpenses += value;
+                        const prevGPR = prevYearResults?.["_actual_gpr"] || 0;
+                        if (yearIndex === 1) {
+                            targetGPR = prevGPR + (gprSettings.firstYearIncrement || 0);
+                        } else {
+                            targetGPR = prevGPR + (gprSettings.subsequentIncrement || 0);
+                        }
+                        results[yId]["_actual_gpr"] = targetGPR;
+
+                        const targetGrossProfit = totalRevenue * (targetGPR / 100);
+                        const targetCOGS = totalRevenue - targetGrossProfit;
+                        const fixedPart = (openStockRM + purchasesRM + otherRMCosts) + manufacturingExpenses + (openWIP - closeWIP) + (openFG - closeFG);
+                        closeStockRM = fixedPart - targetCOGS;
+
+                        results[yId]["Closing Stock (Raw Materials)"] = closeStockRM;
+                        if (results[yId]["Closing Stock"]) results[yId]["Closing Stock"] = closeStockRM;
+
+                        if (yearIndex < yearSettings.length - 1) {
+                            const nextYearId = yearSettings[yearIndex + 1].id;
+                            if (!results[nextYearId]) results[nextYearId] = {};
+                            results[nextYearId]["_forced_opening_stock_rm"] = closeStockRM;
+                        }
                     }
                 }
-            });
-        }
 
-        // --- TARGET GPR LOGIC ---
-        if (gprSettings?.enabled && totalRevenue > 0) {
-            let targetGPR = 0;
-            if (yearIndex === 0) {
-                const actualRMConsumed = openStockRM + purchasesRM + otherRMCosts - closeStockRM;
-                const actualGrossFactoryCost = actualRMConsumed + manufacturingExpenses;
-                const actualFactoryCostProduced = actualGrossFactoryCost + openWIP - closeWIP;
-                const actualCOGS = actualFactoryCostProduced + openFG - closeFG;
-                const actualGrossProfit = totalRevenue - actualCOGS;
-                const actualGPR = (actualGrossProfit / totalRevenue) * 100;
-                results[yId]["_actual_gpr"] = actualGPR;
+                // Manufacturing COGS Calculation
+                const rmConsumed = openStockRM + purchasesRM + otherRMCosts - closeStockRM;
+                results[yId]["Raw Material Consumed"] = rmConsumed;
+
+                const grossFactoryCost = rmConsumed + manufacturingExpenses;
+                results[yId]["Total Manufacturing Expenses"] = manufacturingExpenses;
+                results[yId]["Gross Factory Cost"] = grossFactoryCost;
+
+                const factoryCostProduced = grossFactoryCost + openWIP - closeWIP;
+                results[yId]["Factory Cost of Goods Produced"] = factoryCostProduced;
+
+                cogs = factoryCostProduced + openFG - closeFG;
             } else {
-                const prevGPR = prevYearResults?.["_actual_gpr"] || 0;
-                if (yearIndex === 1) {
-                    targetGPR = prevGPR + (gprSettings.firstYearIncrement || 0);
-                } else {
-                    targetGPR = prevGPR + (gprSettings.subsequentIncrement || 0);
-                }
-                results[yId]["_actual_gpr"] = targetGPR;
+                // === TRADING/WHOLESALE/RETAIL/SERVICE: Simplified COGS ===
+                // Formula: Opening Inventory + Purchases + Freight-in + Other Expenses - Closing Inventory
+                let tradingOtherExpenses = 0; // For any additional expense rows (Power, Labour, etc.)
 
-                const targetGrossProfit = totalRevenue * (targetGPR / 100);
-                const targetCOGS = totalRevenue - targetGrossProfit;
-                const fixedPart = (openStockRM + purchasesRM + otherRMCosts) + manufacturingExpenses + (openWIP - closeWIP) + (openFG - closeFG);
-                closeStockRM = fixedPart - targetCOGS;
+                cogsGroup.rows.forEach(row => {
+                    if (row.is_hidden) return;
 
-                results[yId]["Closing Stock (Raw Materials)"] = closeStockRM;
-                if (results[yId]["Closing Stock"]) results[yId]["Closing Stock"] = closeStockRM;
+                    if (!row.is_calculated && !row.is_total_row && !row.name.startsWith('=')) {
+                        const dp = row.data.find(d => d.year_setting === yId);
+                        const value = parseFloat(dp?.value || 0);
+                        const name = row.name.toLowerCase();
 
-                if (yearIndex < yearSettings.length - 1) {
-                    const nextYearId = yearSettings[yearIndex + 1].id;
-                    if (!results[nextYearId]) results[nextYearId] = {};
-                    results[nextYearId]["_forced_opening_stock_rm"] = closeStockRM;
-                }
+                        if (name.includes('opening') && (name.includes('inventory') || name.includes('stock'))) {
+                            // Waterfall: Use previous year's closing inventory
+                            if (yearIndex > 0) {
+                                openingInventory = prevYearResults?.["Closing Inventory"] || prevYearResults?.["Closing Stock"] || value;
+                            } else {
+                                openingInventory = value;
+                            }
+                            results[yId][row.name] = openingInventory;
+                            results[yId]["Opening Inventory"] = openingInventory;
+                        } else if (name.includes('closing') && (name.includes('inventory') || name.includes('stock'))) {
+                            closingInventory = value;
+                            results[yId]["Closing Inventory"] = closingInventory;
+                        } else if (name.includes('purchase')) {
+                            purchases += value;
+                            results[yId]["Purchases"] = purchases;
+                        } else if (name.includes('freight')) {
+                            freightIn += value;
+                            results[yId]["Freight-in"] = freightIn;
+                        } else {
+                            // CATCH-ALL: Any other expense rows (Power & Fuel, Labour, etc.)
+                            tradingOtherExpenses += value;
+                        }
+                    }
+                });
+
+                // Trading COGS Calculation - includes all expenses
+                cogs = openingInventory + purchases + freightIn + tradingOtherExpenses - closingInventory;
+                results[yId]["Trading Other Expenses"] = tradingOtherExpenses; // For debugging
+
+                // Store for Balance Sheet inventory auto-population
+                closeStockRM = closingInventory; // Use for compatibility with existing BS logic
             }
         }
 
-        const rmConsumed = openStockRM + purchasesRM + otherRMCosts - closeStockRM;
-        results[yId]["Raw Material Consumed"] = rmConsumed;
-
-        const grossFactoryCost = rmConsumed + manufacturingExpenses;
-        results[yId]["Total Manufacturing Expenses"] = manufacturingExpenses;
-        results[yId]["Gross Factory Cost"] = grossFactoryCost;
-
-        const factoryCostProduced = grossFactoryCost + openWIP - closeWIP;
-        results[yId]["Factory Cost of Goods Produced"] = factoryCostProduced;
-
-        const cogs = factoryCostProduced + openFG - closeFG;
         results[yId]["Cost of Goods Sold (COGS)"] = cogs;
 
         const grossProfit = totalRevenue - cogs;
@@ -497,31 +560,79 @@ export const calculateAll = (allGroups, yearSettings, sector, taxRegime, loanSum
         // 2. BALANCE SHEET
         // ========================================
 
-        // A. CURRENT ASSETS
-        // A. CURRENT ASSETS
-        let nonCashCurrentAssets = sumGroup(yId, "Current assets", ["Cash", "Bank"]);
+        // A. CURRENT ASSETS (sum from both possible group names)
+        // CRITICAL FIX: Use a Set of unique row IDs to prevent double-counting (e.g., if "Advance to Suppliers" exists in both groups)
+        let nonCashCurrentAssets = 0;
+        const processedRowIds = new Set();
+        const currentAssetGroupNames = ["Current assets", "Operating Current Assets"];
 
-        // --- AUTO-POPULATE ASSET HEADS FROM OPERATING STATEMENT ---
+        currentAssetGroupNames.forEach(groupNamePart => {
+            const group = allGroups.find(g =>
+                g.name.toLowerCase().includes(groupNamePart.toLowerCase()) ||
+                (g.system_tag && g.system_tag.toLowerCase().includes(groupNamePart.toLowerCase().replace(/\s+/g, '_')))
+            );
+
+            if (group) {
+                group.rows.forEach(row => {
+                    // Skip hidden, calculated, formula, cash-related, and already processed rows
+                    const rowNameLower = row.name.toLowerCase().trim();
+                    const isCash = rowNameLower.includes('cash') || rowNameLower.includes('bank');
+
+                    if (!row.is_hidden && !row.is_calculated && !row.is_total_row && !row.name.startsWith('=') &&
+                        !isCash && !processedRowIds.has(row.id)) {
+                        const val = cellValueIndex.get(`${row.id}_${yId}`) || 0;
+                        nonCashCurrentAssets += isNaN(val) ? 0 : val;
+                        processedRowIds.add(row.id);
+                    }
+                });
+            }
+        });
+
+        // --- AUTO-POPULATE ASSET HEADS FROM OPERATING STATEMENT (SECTOR-AWARE) ---
         // Store closing stock values with BOTH asset names AND P&L names for reliable lookup
 
-        // 1. Raw materials Domestic -> Closing Stock (Raw Materials)
-        const gridRM = getVal(yId, "Raw materials Domestic");
-        results[yId]["Raw materials Domestic"] = closeStockRM;
-        results[yId]["Closing Stock (Raw Materials)"] = closeStockRM;
+        if (isManufacturing) {
+            // MANUFACTURING: Three separate inventory types
+            // 1. Raw materials Domestic -> Closing Stock (Raw Materials)
+            const gridRM = getVal(yId, "Raw materials Domestic");
+            results[yId]["Raw materials Domestic"] = closeStockRM;
+            results[yId]["Closing Stock (Raw Materials)"] = closeStockRM;
 
-        // 2. Stock in process -> Closing Stock (Work-in-Process)
-        const gridWIP = getVal(yId, "Stock in process");
-        results[yId]["Stock in process"] = closeWIP;
-        results[yId]["Closing Stock (Work-in-Process)"] = closeWIP;
+            // 2. Stock in process -> Closing Stock (Work-in-Process)
+            const gridWIP = getVal(yId, "Stock in process");
+            results[yId]["Stock in process"] = closeWIP;
+            results[yId]["Closing Stock (Work-in-Process)"] = closeWIP;
 
-        // 3. Finished goods -> Closing Stock (Finished Goods)
-        const gridFG = getVal(yId, "Finished goods");
-        results[yId]["Finished goods"] = closeFG;
-        results[yId]["Closing Stock (Finished Goods)"] = closeFG;
+            // 3. Finished goods -> Closing Stock (Finished Goods)
+            const gridFG = getVal(yId, "Finished goods");
+            results[yId]["Finished goods"] = closeFG;
+            results[yId]["Closing Stock (Finished Goods)"] = closeFG;
 
-        // Adjust Total Current Assets:
-        // Subtract the values that came from the grid (via sumGroup) and add the calculated values
-        nonCashCurrentAssets = nonCashCurrentAssets - gridRM - gridWIP - gridFG + closeStockRM + closeWIP + closeFG;
+            // Adjust Total Current Assets:
+            // Subtract the values that came from the grid (via sumGroup) and add the calculated values
+            nonCashCurrentAssets = nonCashCurrentAssets - gridRM - gridWIP - gridFG + closeStockRM + closeWIP + closeFG;
+        } else {
+            // TRADING/WHOLESALE/RETAIL/SERVICE: Single inventory type (Stock-in-Trade)
+            // Closing Inventory is calculated from COGS section and MUST flow to Balance Sheet
+
+            // CRITICAL: Use getGridVal (bypasses results cache) to get the ACTUAL grid value
+            // getVal would return the calculated closingInventory we stored earlier in COGS section!
+            const gridInventory = getGridVal(yId, "Stock-in-Trade (Inventory)") ||
+                getGridVal(yId, "Inventory") ||
+                getGridVal(yId, "Closing Inventory") ||
+                getGridVal(yId, "Stock in Trade") ||
+                0;
+
+            // NOW store the calculated closing inventory value
+            results[yId]["Stock-in-Trade (Inventory)"] = closingInventory;
+            results[yId]["Inventory"] = closingInventory;
+            results[yId]["Closing Inventory"] = closingInventory;
+
+            // Replace grid value with calculated value
+            // If grid has a value, subtract it (it was already summed by sumGroup)
+            // Then add the calculated closingInventory
+            nonCashCurrentAssets = nonCashCurrentAssets - gridInventory + closingInventory;
+        }
 
         // B. FIXED ASSETS (WDV Method with Asset Additions)
         let grossBlock;
@@ -666,45 +777,60 @@ export const calculateAll = (allGroups, yearSettings, sector, taxRegime, loanSum
         let shareCapital = 0; // Define for both branches to avoid reference errors
 
         if (isLlpOrProprietorship) {
-            // LLP/Proprietorship: Capital - Drawings + General Reserve (PAT) + Other Heads
-            // 
-            // CRITICAL FIX: Capital flows as the "operating portion" of Net Worth:
-            // - Year 1 Capital = User input
-            // - Year 2+ Capital = Previous Year's Capital + PAT - Drawings (NOT including Share Premium etc.)
-            // 
-            // This prevents double-counting of Share Premium/Other Heads which are absolute values.
+            // LLP/Proprietorship Capital Waterfall:
+            // Opening Capital - Drawings + PAT = Closing Capital (becomes next year's Opening)
+            //
+            // Display Format:
+            //   Share Capital (Opening)     = Opening value for year
+            //   Less: Drawings              = Current year drawings
+            //   Add: General Reserve (PAT)  = Current year PAT
+            //   ─────────────────────────────────────────────────
+            //   Total Capital (Closing)     = Opening - Drawings + PAT = Next year's Opening
 
-            let capital = 0;
+            let openingCapital = 0;
             if (yearIndex === 0) {
-                // First year: look for user input in "Capital" or "Ordinary share capital"
-                capital = getVal(yId, "Capital") || getVal(yId, "Ordinary share capital") || 0;
+                // First year: Opening Capital = User input
+                openingCapital = getVal(yId, "Capital") || getVal(yId, "Ordinary share capital") || getVal(yId, "Share Capital") || 0;
             } else {
-                // Year 2+: Capital = Previous Year's Capital + PAT - Drawings
-                // This is the "operating waterfall" - NOT the full Net Worth
-                const prevCapital = prevYearResults?.["Capital"] || 0;
-                const prevPAT = prevYearResults?.["General Reserve (PAT)"] || prevYearResults?.["Profit After Tax (PAT)"] || 0;
-                const prevDrawings = prevYearResults?.["Drawings"] || 0;
-                capital = prevCapital + prevPAT - prevDrawings;
+                // Year 2+: Opening Capital = Previous Year's Total Net Worth (waterfall)
+                openingCapital = prevYearResults?.["Total Net Worth"] ||
+                    prevYearResults?.["Total Capital"] ||
+                    prevYearResults?.["Closing Capital"] || 0;
             }
-            results[yId]["Capital"] = capital;
-            shareCapital = capital; // For cash flow calculations
 
-            // Drawings: Get from standard row input
-            const yearDrawings = getVal(yId, "Drawings") || 0;
-            results[yId]["Drawings"] = yearDrawings;
+            // Drawings: Get from GRID input (use getGridVal to bypass cache)
+            // This ensures we get the actual user-entered value
+            const yearDrawings = getGridVal(yId, "Drawings") || 0;
 
             // General Reserve (PAT): Use this year's PAT from Operating Statement
             const generalReservePAT = results[yId]["Profit After Tax (PAT)"] || 0;
 
+            // Total Net Worth = Opening Capital - Drawings + PAT (this is the waterfall)
+            const closingNetWorth = openingCapital - yearDrawings + generalReservePAT;
 
-            results[yId]["General Reserve (PAT)"] = generalReservePAT;
+            // Store all values for display (matching grid row names exactly)
+            results[yId]["Capital"] = openingCapital;                // Opening Capital for display
+            results[yId]["Share Capital"] = openingCapital;          // Alias
+            results[yId]["Ordinary share capital"] = openingCapital; // Alias
+            results[yId]["Drawings"] = yearDrawings;                 // Current year drawings
+            results[yId]["General Reserve (PAT)"] = generalReservePAT; // Current year PAT
 
-            // Net Worth = Capital - Drawings + General Reserve (PAT) + Other Heads
-            // Other Heads (Share Premium, Revaluation Reserves, etc.) are ABSOLUTE values each year
-            // Since Capital only carries forward the operating portion, we add full Other Heads value
-            const otherHeads = sumGroup(yId, "Net Worth", ["Capital", "Drawings", "General reserve", "Total Net Worth", "Ordinary share capital", "Share Capital", "Reserves & Surplus"]);
+            // Total Net Worth = Closing value (becomes next year's opening)
+            results[yId]["Total Net Worth"] = closingNetWorth;       // Main key matching grid
+            results[yId]["Total Capital"] = closingNetWorth;         // Alias for compatibility
+            results[yId]["Closing Capital"] = closingNetWorth;       // Alias for next year waterfall
 
-            totalNetWorth = capital - yearDrawings + generalReservePAT + otherHeads;
+            // Total Reserves = General Reserve (PAT) for LLP/Proprietorship
+            results[yId]["Total Reserves"] = generalReservePAT;
+            results[yId]["Reserves"] = generalReservePAT;
+
+            shareCapital = openingCapital; // For cash flow calculations
+
+            // Other Heads (Share Premium, Revaluation Reserves, etc.) - absolute values each year
+            const otherHeads = sumGroup(yId, "Net Worth", ["Capital", "Drawings", "General reserve", "Total Net Worth", "Ordinary share capital", "Share Capital", "Reserves & Surplus", "Total Capital", "Total Reserves"]);
+
+            // Final totalNetWorth includes other heads if any
+            totalNetWorth = closingNetWorth + otherHeads;
         } else {
             // Domestic Company: Original calculation
             // 1. Share Capital & Other Equity (Excluding General Reserve & Net Worth itself)
@@ -1403,14 +1529,6 @@ export const calculateAll = (allGroups, yearSettings, sector, taxRegime, loanSum
             depreciation: depreciation,
             totalInterestExpensed: totalInterestExpensed
         };
-
-        // Log to console for debugging
-        console.log(`--- Year ${year.year} Residual Audit ---`);
-        console.log(`Liability Movement: ${liabMovement}`);
-        console.log(`Asset Movement (Non-Cash): ${assetMovement}`);
-        console.log(`BS Needs Explanation for: ${actualBsMovement}`);
-        console.log(`CFS Explains (Net Cash Flow): ${cfsExplanation}`);
-        console.log(`LEAK AMOUNT: ${leakAmount}`);
 
         // Identify Ghost Rows - rows that changed but weren't captured in CFS
         // EXCLUDE rows that are intentionally not captured (Cash, Net Block, General Reserve, Interest)
