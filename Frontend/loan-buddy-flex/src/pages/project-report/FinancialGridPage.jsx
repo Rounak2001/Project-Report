@@ -30,16 +30,6 @@ function DataCell({ rowId, yearId, initialValue, onSave, row, yearSettings, onAu
         if (Math.abs(newValue - oldValue) < 0.001) return;
 
         await onSave(rowId, yearId, newValue);
-
-        // Auto-project ONLY from the FIRST year (index 0) to avoid cascading projections
-        // AND skip for stock rows and general reserve
-        const isStockRow = row.name.toLowerCase().includes('opening stock') || row.name.toLowerCase().includes('closing stock');
-        const isGeneralReserve = row.name === 'General reserve';
-        const currentYearIndex = yearSettings.findIndex(y => y.id === yearId);
-
-        if (!isStockRow && !isGeneralReserve && currentYearIndex === 0 && newValue > 0) {
-            onAutoProject(row, currentYearIndex, newValue);
-        }
     };
 
     return (
@@ -82,14 +72,13 @@ function DataCell({ rowId, yearId, initialValue, onSave, row, yearSettings, onAu
     );
 }
 
-function ProjectionTool({ row, years, onRun }) {
-    const [pct, setPct] = useState(10);
+function ProjectionTool({ row, years, onRun, currentRate, onChangeRate }) {
     const [baseYearIndex, setBaseYearIndex] = useState(0);
 
     const handleProjection = () => {
         const baseYear = years[baseYearIndex];
         const baseValue = row.data.find(d => d.year_setting === baseYear.id)?.value || 0;
-        onRun(row.id, baseYear.year, baseValue, pct);
+        onRun(row.id, baseYear.year, baseValue, currentRate || 10);
     };
 
     return (
@@ -107,8 +96,9 @@ function ProjectionTool({ row, years, onRun }) {
                 <input
                     type="number"
                     className="w-12 h-6 text-xs border border-gray-300 rounded text-center"
-                    value={pct}
-                    onChange={e => setPct(e.target.value)}
+                    value={currentRate || 10}
+                    onChange={e => onChangeRate(parseFloat(e.target.value) || 0)}
+                    onBlur={handleProjection}
                 />
                 <span className="text-xs">%</span>
             </div>
@@ -155,7 +145,16 @@ function SmartProjectionTool({ row, onRun, label }) {
 
 // --- 6. Financial Grid Page (Smart Grid) ---
 export function FinancialGridPage({ pageType, title }) {
-    const { currentReport, yearSettings, operatingGroups, assetGroups, liabilityGroups, projectCosts, reloadFinancialData } = useContext(AppContext);
+    const {
+        currentReport,
+        yearSettings,
+        operatingGroups,
+        assetGroups,
+        liabilityGroups,
+        projectCosts,
+        reloadFinancialData,
+        setAllFinancialData
+    } = useContext(AppContext);
     const navigate = useNavigate();
 
     // --- Formula Feature State ---
@@ -182,6 +181,9 @@ export function FinancialGridPage({ pageType, title }) {
     // --- Loading & Message State ---
     const [loading, setLoading] = useState(false);
     const [message, setMessage] = useState(null);
+
+    // --- Projection Automation State ---
+    const [rowProjectionRates, setRowProjectionRates] = useState({});
 
     const hasSyncedAssetsRef = useRef(false);
 
@@ -344,7 +346,7 @@ export function FinancialGridPage({ pageType, title }) {
             }
 
             await fetchLoanData();
-            await reloadFinancialData(currentReport.id);
+            await reloadFinancialData(currentReport.id, true);
             setMessage({ type: 'success', text: 'Loan schedule generated successfully!' });
         } catch (error) {
             console.error("Failed to generate loan schedule:", error);
@@ -528,14 +530,14 @@ export function FinancialGridPage({ pageType, title }) {
             return null;
         };
 
-        // 3. Save to Database
+        // 3. Save to Database - BATCHED for speed
+        const cellsToSave = [];
 
         // A. Gross Block (Asset Page) -> Opening WDV + Additions
         const grossBlockRowId = await findRowId("Gross block", 'asset');
         if (grossBlockRowId) {
             for (const year of yearSettings) {
-                await apiClient.saveCell({
-                    report_id: currentReport.id,
+                cellsToSave.push({
                     row_id: grossBlockRowId,
                     year_setting_id: year.id,
                     value: grossBlockMap[year.id]
@@ -544,12 +546,10 @@ export function FinancialGridPage({ pageType, title }) {
         }
 
         // B. Depreciation (Asset Page) -> Annual Depreciation
-        // So that Net Block = Gross Block - Depreciation
         const assetDepRowId = await findRowId("Depreciation", 'asset');
         if (assetDepRowId) {
             for (const year of yearSettings) {
-                await apiClient.saveCell({
-                    report_id: currentReport.id,
+                cellsToSave.push({
                     row_id: assetDepRowId,
                     year_setting_id: year.id,
                     value: annualDepMap[year.id]
@@ -558,12 +558,10 @@ export function FinancialGridPage({ pageType, title }) {
         }
 
         // C. Depreciation (Operating Page) -> Annual Depreciation Expense
-        // Changed target to generic "Depreciation" as per user request
         const opDepRowId = await findRowId("Depreciation", 'operating');
         if (opDepRowId) {
             for (const year of yearSettings) {
-                await apiClient.saveCell({
-                    report_id: currentReport.id,
+                cellsToSave.push({
                     row_id: opDepRowId,
                     year_setting_id: year.id,
                     value: annualDepMap[year.id]
@@ -571,8 +569,19 @@ export function FinancialGridPage({ pageType, title }) {
             }
         }
 
-        // Reload data to reflect changes
-        await reloadFinancialData(currentReport.id);
+        if (cellsToSave.length > 0) {
+            try {
+                await apiClient.saveMultipleCells({
+                    report_id: currentReport.id,
+                    cells: cellsToSave
+                });
+            } catch (error) {
+                console.error("Failed to batch save assets:", error);
+            }
+        }
+
+        // Reload data once after the batch save
+        await reloadFinancialData(currentReport.id, true);
     };
 
     const startFormulaMode = (rowId, yearId, currentVal, setValFn) => {
@@ -1644,26 +1653,87 @@ export function FinancialGridPage({ pageType, title }) {
             }
         }
 
-        try {
-            // Standard save
-            await apiClient.saveCell({
-                report_id: currentReport.id,
-                row_id: finalRowId,
-                year_setting_id: yearId,
-                value: val
-            });
+        // --- CALC PROJECTIONS (If applicable) ---
+        const row = [...operatingGroups, ...assetGroups, ...liabilityGroups]
+            .flatMap(g => g.rows).find(r => r.id === rowId); // Use original ID to find row metadata
 
-            // We MUST reload to update totals across the app (e.g. Net Profit depends on Sales)
-            await reloadFinancialData(currentReport.id);
+        let cellsToSave = [{ row_id: finalRowId, year_setting_id: yearId, value: val }];
+
+        const isStockRow = row?.name?.toLowerCase().includes('opening stock') || row?.name?.toLowerCase().includes('closing stock');
+        const isGeneralReserve = row?.name === 'General reserve';
+        const currentYearIndex = yearSettings.findIndex(y => y.id === yearId);
+        const rate = rowProjectionRates[rowId] !== undefined ? rowProjectionRates[rowId] : 10;
+
+        if (row && !isStockRow && !isGeneralReserve && val > 0 && currentYearIndex !== -1) {
+            const futureYears = yearSettings.slice(currentYearIndex + 1);
+            let currentValue = val;
+            futureYears.forEach(year => {
+                currentValue = currentValue * (1 + rate / 100);
+                cellsToSave.push({
+                    row_id: finalRowId,
+                    year_setting_id: year.id,
+                    value: Math.round(currentValue * 100) / 100
+                });
+            });
+        }
+
+        // --- OPTIMISTIC UPDATE ---
+        setAllFinancialData(prev => {
+            const updateRowsInData = (groups) => groups.map(group => ({
+                ...group,
+                rows: group.rows.map(r => {
+                    if (r.id === finalRowId) {
+                        const newData = [...(r.data || [])];
+                        cellsToSave.forEach(cell => {
+                            const cellIdx = newData.findIndex(d => d.year_setting === cell.year_setting_id);
+                            if (cellIdx !== -1) {
+                                newData[cellIdx] = { ...newData[cellIdx], value: cell.value };
+                            } else {
+                                newData.push({ year_setting: cell.year_setting_id, value: cell.value });
+                            }
+                        });
+                        return { ...r, data: newData };
+                    }
+                    return r;
+                })
+            }));
+
+            return {
+                ...prev,
+                operatingGroups: updateRowsInData(prev.operatingGroups),
+                assetGroups: updateRowsInData(prev.assetGroups),
+                liabilityGroups: updateRowsInData(prev.liabilityGroups),
+            };
+        });
+
+        try {
+            if (cellsToSave.length > 1) {
+                await apiClient.saveMultipleCells({
+                    report_id: currentReport.id,
+                    cells: cellsToSave
+                });
+            } else {
+                await apiClient.saveCell({
+                    report_id: currentReport.id,
+                    row_id: finalRowId,
+                    year_setting_id: yearId,
+                    value: val
+                });
+            }
+
+            // SILENT reload: No global spinner for cell saves
+            await reloadFinancialData(currentReport.id, true);
             await fetchLoanData();
 
         } catch (error) {
             console.error("Error saving cell:", error);
+            // On hard error, reload background to sync
+            await reloadFinancialData(currentReport.id, false);
         }
     };
 
     const handleAutoProjection = async (row, baseYearIndex, baseValue) => {
-        const defaultGrowthRate = 10; // 10% default growth
+        const rate = rowProjectionRates[row.id] !== undefined ? rowProjectionRates[row.id] : 10;
         const futureYears = yearSettings.slice(baseYearIndex + 1);
 
         let currentValue = baseValue;
@@ -1676,7 +1746,7 @@ export function FinancialGridPage({ pageType, title }) {
         }
 
         const cells = futureYears.map(year => {
-            currentValue = currentValue * (1 + defaultGrowthRate / 100);
+            currentValue = currentValue * (1 + rate / 100);
             return {
                 row_id: finalRowId,
                 year_setting_id: year.id,
@@ -1685,6 +1755,31 @@ export function FinancialGridPage({ pageType, title }) {
         });
 
         if (cells.length > 0) {
+            // --- OPTIMISTIC UPDATE ---
+            setAllFinancialData(prev => {
+                const updateRowsInData = (groups) => groups.map(group => ({
+                    ...group,
+                    rows: group.rows.map(r => {
+                        if (r.id === finalRowId) {
+                            const newData = [...(r.data || [])];
+                            cells.forEach(cell => {
+                                const idx = newData.findIndex(d => d.year_setting === cell.year_setting_id);
+                                if (idx !== -1) newData[idx] = { ...newData[idx], value: cell.value };
+                                else newData.push({ year_setting: cell.year_setting_id, value: cell.value });
+                            });
+                            return { ...r, data: newData };
+                        }
+                        return r;
+                    })
+                }));
+                return {
+                    ...prev,
+                    operatingGroups: updateRowsInData(prev.operatingGroups),
+                    assetGroups: updateRowsInData(prev.assetGroups),
+                    liabilityGroups: updateRowsInData(prev.liabilityGroups),
+                };
+            });
+
             try {
                 await apiClient.saveMultipleCells({
                     report_id: currentReport.id,
@@ -1694,7 +1789,7 @@ export function FinancialGridPage({ pageType, title }) {
                 console.error(e);
             }
         }
-        await reloadFinancialData(currentReport.id);
+        await reloadFinancialData(currentReport.id, true);
     };
 
     const handleProjection = async (rowId, baseYear, baseValue, pct) => {
@@ -1705,9 +1800,54 @@ export function FinancialGridPage({ pageType, title }) {
             else return;
         }
 
+        // --- OPTIMISTIC UPDATE ---
+        // Calculate projected values locally
+        const baseYearIndex = yearSettings.findIndex(y => y.year === baseYear);
+        if (baseYearIndex !== -1) {
+            const futureYears = yearSettings.slice(baseYearIndex + 1);
+            let currentValue = baseValue;
+            const projectedCells = futureYears.map(year => {
+                currentValue = currentValue * (1 + pct / 100);
+                return {
+                    year_setting_id: year.id,
+                    value: Math.round(currentValue * 100) / 100
+                };
+            });
+
+            setAllFinancialData(prev => {
+                const updateRowsInData = (groups) => groups.map(group => ({
+                    ...group,
+                    rows: group.rows.map(r => {
+                        if (r.id === finalRowId) {
+                            const newData = [...(r.data || [])];
+                            projectedCells.forEach(cell => {
+                                const idx = newData.findIndex(d => d.year_setting === cell.year_setting_id);
+                                if (idx !== -1) newData[idx] = { ...newData[idx], value: cell.value };
+                                else newData.push({ year_setting: cell.year_setting_id, value: cell.value });
+                            });
+                            return { ...r, data: newData };
+                        }
+                        return r;
+                    })
+                }));
+                return {
+                    ...prev,
+                    operatingGroups: updateRowsInData(prev.operatingGroups),
+                    assetGroups: updateRowsInData(prev.assetGroups),
+                    liabilityGroups: updateRowsInData(prev.liabilityGroups),
+                };
+            });
+        }
+
         // Standard projection
-        await apiClient.runProjection(finalRowId, { base_year: baseYear, base_value: baseValue, percentage: pct });
-        await reloadFinancialData(currentReport.id);
+        try {
+            await apiClient.runProjection(finalRowId, { base_year: baseYear, base_value: baseValue, percentage: pct });
+            // SILENT reload to sync
+            await reloadFinancialData(currentReport.id, true);
+        } catch (error) {
+            console.error("Projection failed:", error);
+            await reloadFinancialData(currentReport.id, false);
+        }
     };
 
     const handleSmartProject = async (rowId, percentage, baseRowName) => {
@@ -1772,7 +1912,7 @@ export function FinancialGridPage({ pageType, title }) {
                 console.error(e);
             }
         }
-        await reloadFinancialData(currentReport.id);
+        await reloadFinancialData(currentReport.id, true);
     };
 
     if (!yearSettings || yearSettings.length === 0) return <FullScreenLoader text="Initializing Grid..." />;
@@ -1898,7 +2038,13 @@ export function FinancialGridPage({ pageType, title }) {
                                                                 onRun={(id, pct) => handleSmartProject(id, pct, "Purchases (Raw Materials)")}
                                                             />
                                                         ) : (
-                                                            <ProjectionTool row={row} years={yearSettings} onRun={handleProjection} />
+                                                            <ProjectionTool
+                                                                row={row}
+                                                                years={yearSettings}
+                                                                onRun={handleProjection}
+                                                                currentRate={rowProjectionRates[row.id]}
+                                                                onChangeRate={(newRate) => setRowProjectionRates(prev => ({ ...prev, [row.id]: newRate }))}
+                                                            />
                                                         )
                                                     )
                                             )}

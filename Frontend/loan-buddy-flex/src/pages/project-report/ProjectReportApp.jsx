@@ -93,8 +93,8 @@ function ProjectReportApp() {
 
   // NEW: This function is called by grid pages to refresh data
   // OPTIMIZED: Only fetch grid data, not the full report
-  const reloadFinancialData = useCallback(async (reportId) => {
-    setLoading(true);
+  const reloadFinancialData = useCallback(async (reportId, silent = false) => {
+    if (!silent) setLoading(true);
     try {
       // Re-fetch only grid data (not the report itself)
       const [yearSettings, opGroups, asGroups, liGroups, projectCosts] = await Promise.all([
@@ -114,10 +114,10 @@ function ProjectReportApp() {
       });
     } catch (err) {
       console.error("Failed to reload financial data:", err);
-      setAppError("Failed to reload data.");
+      if (!silent) setAppError("Failed to reload data.");
     }
-    setLoading(false);
-  }, [setAppError]);
+    if (!silent) setLoading(false);
+  }, [setAppError, setLoading, setAllFinancialData]);
 
   const goToHome = () => {
     setCurrentReport(null);
@@ -142,6 +142,7 @@ function ProjectReportApp() {
     goToHome,
     // Grid Data
     ...allFinancialData,
+    setAllFinancialData,
     reloadFinancialData
   };
 

@@ -891,7 +891,158 @@ class FinancialGroupViewSet(viewsets.ReadOnlyModelViewSet):
         return queryset.filter(report_id=report_id, page_type=page_type)
 
 
-class FinancialRowViewSet(viewsets.ModelViewSet):
+class FinancialCalculationMixin:
+    """
+    Shared logic for calculating totals and stock flows across different ViewSets.
+    """
+    def _calculate_group_totals(self, group, report, target_year_id=None):
+        """
+        Optimized: Calculate and save totals for all total rows in a group.
+        Uses in-memory calculation and bulk updates to minimize DB queries.
+        """
+        total_rows = list(group.rows.filter(is_total_row=True))
+        if not total_rows:
+            return
+
+        # Get all non-total, non-calculated rows in this group
+        item_rows = list(group.rows.filter(is_total_row=False, is_calculated=False))
+        
+        # Determine years to calculate
+        if target_year_id:
+            year_settings = list(report.year_settings.filter(id=target_year_id))
+        else:
+            year_settings = list(report.year_settings.all())
+        
+        if not year_settings:
+            return
+
+        # Single Query Optimization: Fetch all data points for relevant rows/years in one go
+        row_ids = [r.id for r in item_rows] + [r.id for r in total_rows]
+        year_ids = [y.id for y in year_settings]
+        
+        data_points = FinancialData.objects.filter(
+            row_id__in=row_ids,
+            year_setting_id__in=year_ids
+        )
+        
+        # Index data points in memory for O(1) lookup
+        data_map = {(dp.row_id, dp.year_setting_id): dp for dp in data_points}
+        
+        updates = []
+        creates = []
+
+        for total_row in total_rows:
+            for year in year_settings:
+                total_value = 0
+                for item_row in item_rows:
+                    dp = data_map.get((item_row.id, year.id))
+                    if not dp:
+                        continue
+                        
+                    row_value = float(dp.value)
+                    
+                    # Special calculation rules
+                    if (total_row.name == "= Cost of Goods Sold" and 
+                        ('Closing Stock' in item_row.name or 'Closing Inventory' in item_row.name)):
+                        total_value -= row_value
+                    elif total_row.name == "Total Assets":
+                        if item_row.is_total_row:
+                            total_value += row_value
+                    elif total_row.name == "Total Liabilities and Net Worth":
+                        if item_row.is_total_row:
+                            total_value += row_value
+                    else:
+                        total_value += row_value
+                
+                existing_total_dp = data_map.get((total_row.id, year.id))
+                
+                if existing_total_dp:
+                    if float(existing_total_dp.value) != float(total_value):
+                        existing_total_dp.value = total_value
+                        updates.append(existing_total_dp)
+                else:
+                    creates.append(FinancialData(
+                        row=total_row,
+                        year_setting=year,
+                        value=total_value
+                    ))
+
+        if updates:
+            FinancialData.objects.bulk_update(updates, ['value'])
+        if creates:
+            FinancialData.objects.bulk_create(creates)
+
+    def _populate_opening_stocks(self, report):
+        """
+        Optimized: Populate opening stocks from previous year's closing stocks.
+        Uses in-memory lookup and bulk updates to minimize DB queries.
+        """
+        stock_pairs = [
+            ("Opening Stock (Raw Materials)", "Closing Stock (Raw Materials)"),
+            ("Opening Stock (Work-in-Process)", "Closing Stock (Work-in-Process)"),
+            ("Opening Stock (Finished Goods)", "Closing Stock (Finished Goods)"),
+            ("Opening Inventory", "Closing Inventory")
+        ]
+        
+        opening_names = [p[0] for p in stock_pairs]
+        closing_names = [p[1] for p in stock_pairs]
+        
+        all_stock_rows = list(FinancialRow.objects.filter(
+            group__report=report, 
+            name__in=opening_names + closing_names
+        ))
+        
+        if not all_stock_rows:
+            return
+            
+        opening_rows = [r for r in all_stock_rows if r.name in opening_names]
+        closing_rows = [r for r in all_stock_rows if r.name in closing_names]
+        
+        year_settings = list(report.year_settings.all().order_by('year'))
+        if len(year_settings) < 2:
+            return
+
+        row_ids = [r.id for r in all_stock_rows]
+        data_points = FinancialData.objects.filter(row_id__in=row_ids)
+        data_map = {(dp.row_id, dp.year_setting_id): dp for dp in data_points}
+        
+        updates = []
+        creates = []
+        
+        for opening_row in opening_rows:
+            idx = opening_names.index(opening_row.name)
+            target_closing_name = closing_names[idx]
+            matching_closing_rows = [r for r in closing_rows if r.name == target_closing_name]
+            
+            for closing_row in matching_closing_rows:
+                for j in range(1, len(year_settings)):
+                    current_year = year_settings[j]
+                    previous_year = year_settings[j-1]
+                    
+                    closing_dp = data_map.get((closing_row.id, previous_year.id))
+                    if not closing_dp:
+                        continue
+                        
+                    opening_dp = data_map.get((opening_row.id, current_year.id))
+                    
+                    if opening_dp:
+                        if float(opening_dp.value) != float(closing_dp.value):
+                            opening_dp.value = closing_dp.value
+                            updates.append(opening_dp)
+                    else:
+                        creates.append(FinancialData(
+                            row=opening_row,
+                            year_setting=current_year,
+                            value=closing_dp.value
+                        ))
+        
+        if updates:
+            FinancialData.objects.bulk_update(updates, ['value'])
+        if creates:
+            FinancialData.objects.bulk_create(creates)
+
+
+class FinancialRowViewSet(viewsets.ModelViewSet, FinancialCalculationMixin):
     """
     API endpoint for the "Manage Items" page.
     Handles creating, deleting, and updating (hiding) "heads".
@@ -946,15 +1097,8 @@ class FinancialRowViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def run_projection(self, request, pk=None):
         """
-        This is the "GO" button automation.
-        It calculates and saves all projected values for a single row.
-        
-        Expected POST data:
-        {
-            "base_year": 2024,
-            "base_value": 10000,
-            "percentage": 10.0
-        }
+        Optimized: This is the "GO" button automation.
+        Calculates and saves all projected values for a single row in one batch.
         """
         row = self.get_object()
         report = row.group.report
@@ -962,52 +1106,56 @@ class FinancialRowViewSet(viewsets.ModelViewSet):
         try:
             base_year = int(request.data.get('base_year'))
             base_value = float(request.data.get('base_value'))
-            percentage = float(request.data.get('percentage')) / 100.0
+            percentage = float(request.data.get('percentage', 0)) / 100.0
         except (ValueError, TypeError, AttributeError):
-            return Response(
-                {"error": "Invalid base_year, base_value, or percentage."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({"error": "Invalid base_year, base_value, or percentage."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # FIRST: Save the base year value itself!
-        # This was missing before - base year value was never persisted
-        base_year_setting = ReportYearSetting.objects.filter(
-            report=report,
-            year=base_year
-        ).first()
+        # Get all relevant year settings
+        all_years = list(ReportYearSetting.objects.filter(report=report, year__gte=base_year).order_by('year'))
+        if not all_years:
+            return Response({"status": "No years to project."}, status=status.HTTP_200_OK)
+
+        # Bulk Fetch existing data
+        existing_data = FinancialData.objects.filter(row=row, year_setting__in=all_years)
+        data_map = {dp.year_setting_id: dp for dp in existing_data}
         
-        if base_year_setting:
-            FinancialData.objects.update_or_create(
-                row=row,
-                year_setting=base_year_setting,
-                defaults={'value': round(base_value, 2)}
-            )
+        to_create = []
+        to_update = []
+        current_calc_value = base_value
 
-        # Get all year columns *after* the base year
-        projected_years = ReportYearSetting.objects.filter(
-            report=report, 
-            year__gt=base_year 
-        ).order_by('year')
-
-        current_value = base_value
-        for year_setting in projected_years:
-            # This is the "on-the-go" calculation logic, but on the backend
-            current_value = current_value * (1 + percentage)
+        for i, year_setting in enumerate(all_years):
+            # For the first year, it's the base value. For subsequent, it's compounded.
+            if i > 0:
+                current_calc_value = current_calc_value * (1 + percentage)
             
-            # Save this new value to the database
-            FinancialData.objects.update_or_create(
-                row=row,
-                year_setting=year_setting,
-                defaults={'value': round(current_value, 2)} # Round to 2 decimal places
-            )
+            final_val = round(current_calc_value, 2)
+            
+            dp = data_map.get(year_setting.id)
+            if dp:
+                if float(dp.value) != final_val:
+                    dp.value = final_val
+                    to_update.append(dp)
+            else:
+                to_create.append(FinancialData(row=row, year_setting=year_setting, value=final_val))
 
-        return Response(
-            {"status": f"Projection for '{row.name}' complete."},
-            status=status.HTTP_200_OK
-        )
+        # Perform atomic bulk operations
+        if to_update:
+            FinancialData.objects.bulk_update(to_update, ['value'])
+        if to_create:
+            FinancialData.objects.bulk_create(to_create)
+            
+        # Trigger recalculations (optimized internal calls)
+        self._calculate_group_totals(row.group, report)
+        
+        # Check if stock flow is needed
+        closing_row_names = ["Closing Stock (Raw Materials)", "Closing Stock (Work-in-Process)", "Closing Stock (Finished Goods)", "Closing Inventory"]
+        if row.name in closing_row_names:
+            self._populate_opening_stocks(report)
+
+        return Response({"status": f"Projected {len(all_years)} years successfully."}, status=status.HTTP_200_OK)
 
 
-class FinancialDataViewSet(viewsets.GenericViewSet):
+class FinancialDataViewSet(viewsets.GenericViewSet, FinancialCalculationMixin):
     """
     API endpoint for saving a single cell in the grid.
     We only need the 'save_cell' action.
@@ -1033,73 +1181,64 @@ class FinancialDataViewSet(viewsets.GenericViewSet):
             report = FinancialReport.objects.get(id=request.data.get('report_id'))
             row = FinancialRow.objects.get(id=request.data.get('row_id'))
             year_setting = ReportYearSetting.objects.get(id=request.data.get('year_setting_id'))
-            value = request.data.get('value', 0)
+            value = float(request.data.get('value', 0))
             
-        except (FinancialReport.DoesNotExist, FinancialRow.DoesNotExist, ReportYearSetting.DoesNotExist, ValueError):
-            return Response(
-                {"error": "Invalid report, row, or year."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        except (FinancialReport.DoesNotExist, FinancialRow.DoesNotExist, ReportYearSetting.DoesNotExist, ValueError, TypeError):
+            return Response({"error": "Invalid report, row, or year."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # This command is the core of the app:
-        # It finds the cell and updates it, or creates it if it doesn't exist.
+        # Update or Create data point
         data_point, created = FinancialData.objects.update_or_create(
             row=row,
             year_setting=year_setting,
             defaults={'value': value}
         )
         
-        # --- Handle Automatic Stock Adjustments ---
-        # This logic is based on your 'views.py'
+        # --- Optimized Stock Handling ---
+        closing_row_names = ["Closing Stock (Raw Materials)", "Closing Stock (Work-in-Process)", "Closing Stock (Finished Goods)", "Closing Inventory"]
+        is_stock_row = row.name in closing_row_names
         
-        # Check if this row is a "closing" stock row
-        closing_row_names = [
-            "Closing Stock (Raw Materials)", 
-            "Closing Stock (Work-in-Process)", 
-            "Closing Stock (Finished Goods)",
-            "Closing Inventory" # For Retail/Wholesale
-        ]
-        
-        if row.name in closing_row_names:
-            # This is a closing stock row. We need to update ALL future years' opening stock.
-            
-            # 1. Find the corresponding "opening" row name
+        if is_stock_row:
+            # Only update future years if it's a closing stock row
             opening_row_name = row.name.replace("Closing", "Opening")
-            
-            # 2. Find the "opening" row object
             try:
-                opening_row = FinancialRow.objects.get(
-                    group=row.group, 
-                    name=opening_row_name
-                )
-            except FinancialRow.DoesNotExist:
-                 # No matching opening row, continue with normal save
-                 pass
-            else:
-                # 3. Find ALL future year settings
-                future_year_settings = ReportYearSetting.objects.filter(
-                    report=report,
-                    year__gt=year_setting.year
-                ).order_by('year')
+                opening_row = FinancialRow.objects.get(group=row.group, name=opening_row_name)
+                future_years = list(ReportYearSetting.objects.filter(report=report, year__gt=year_setting.year))
                 
-                # 4. Update opening stock for all future years
-                for future_year in future_year_settings:
-                    FinancialData.objects.update_or_create(
-                        row=opening_row,
-                        year_setting=future_year,
-                        defaults={'value': value}
-                    )
+                if future_years:
+                    # Bulk update/create for future opening stocks
+                    futures_to_create = []
+                    futures_to_update = []
+                    
+                    # Fetch existing data points in one query for future years
+                    existing_futures = FinancialData.objects.filter(row=opening_row, year_setting__in=future_years)
+                    futures_map = {dp.year_setting_id: dp for dp in existing_futures}
+                    
+                    for fy in future_years:
+                        f_dp = futures_map.get(fy.id)
+                        if f_dp:
+                            if float(f_dp.value) != value:
+                                f_dp.value = value
+                                futures_to_update.append(f_dp)
+                        else:
+                            futures_to_create.append(FinancialData(row=opening_row, year_setting=fy, value=value))
+                    
+                    if futures_to_update:
+                        FinancialData.objects.bulk_update(futures_to_update, ['value'])
+                    if futures_to_create:
+                        FinancialData.objects.bulk_create(futures_to_create)
+            except FinancialRow.DoesNotExist:
+                pass
+            
+            # Recalculate stock waterfall only if needed
+            self._populate_opening_stocks(report)
+            
+            # If stock was updated, it affects future years, so recalculate ALL years for the group
+            self._calculate_group_totals(row.group, report)
+        else:
+            # Recalculate totals ONLY for the group and target year affected for non-stock rows
+            self._calculate_group_totals(row.group, report, target_year_id=year_setting.id)
         
-        # Also populate opening stock from previous year's closing stock on startup
-        self._populate_opening_stocks(report)
-        
-        # Auto-calculate totals for the group after saving
-        self._calculate_group_totals(row.group, report)
-        
-        return Response(
-            {"status": "Cell saved", "id": data_point.id, "value": data_point.value},
-            status=status.HTTP_200_OK
-        )
+        return Response({"status": "Cell saved", "id": data_point.id, "value": data_point.value}, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=['post'])
     def save_multiple_cells(self, request):
@@ -1115,9 +1254,9 @@ class FinancialDataViewSet(viewsets.GenericViewSet):
         }
         """
         report_id = request.data.get('report_id')
-        cells = request.data.get('cells', [])
+        cells_data = request.data.get('cells', [])
         
-        if not report_id or not cells:
+        if not report_id or not cells_data:
             return Response({"error": "report_id and cells list are required."}, status=status.HTTP_400_BAD_REQUEST)
             
         try:
@@ -1125,156 +1264,61 @@ class FinancialDataViewSet(viewsets.GenericViewSet):
         except FinancialReport.DoesNotExist:
             return Response({"error": "Invalid report_id."}, status=status.HTTP_400_BAD_REQUEST)
 
-        updated_rows = set()
-        closing_row_names = [
-            "Closing Stock (Raw Materials)", 
-            "Closing Stock (Work-in-Process)", 
-            "Closing Stock (Finished Goods)",
-            "Closing Inventory"
-        ]
+        # Bulk Fetch optimization: Get all rows and year settings in one go
+        row_ids = [c.get('row_id') for c in cells_data]
+        year_ids = [c.get('year_setting_id') for c in cells_data]
         
-        for cell in cells:
-            try:
-                row = FinancialRow.objects.get(id=cell.get('row_id'))
-                year_setting = ReportYearSetting.objects.get(id=cell.get('year_setting_id'))
-                value = cell.get('value', 0)
-                
-                FinancialData.objects.update_or_create(
-                    row=row,
-                    year_setting=year_setting,
-                    defaults={'value': value}
-                )
-                updated_rows.add(row)
-                
-                if row.name in closing_row_names:
-                    opening_row_name = row.name.replace("Closing", "Opening")
-                    try:
-                        opening_row = FinancialRow.objects.get(group=row.group, name=opening_row_name)
-                        future_year_settings = ReportYearSetting.objects.filter(
-                            report=report,
-                            year__gt=year_setting.year
-                        )
-                        for future_year in future_year_settings:
-                            FinancialData.objects.update_or_create(
-                                row=opening_row,
-                                year_setting=future_year,
-                                defaults={'value': value}
-                            )
-                    except FinancialRow.DoesNotExist:
-                        pass
-                        
-            except (FinancialRow.DoesNotExist, ReportYearSetting.DoesNotExist):
+        rows_map = {r.id: r for r in FinancialRow.objects.filter(id__in=row_ids).select_related('group')}
+        years_map = {y.id: y for y in ReportYearSetting.objects.filter(id__in=year_ids)}
+        
+        existing_data = FinancialData.objects.filter(row_id__in=row_ids, year_setting_id__in=year_ids)
+        data_map = {(dp.row_id, dp.year_setting_id): dp for dp in existing_data}
+        
+        to_create = []
+        to_update = []
+        updated_groups = set()
+        any_stock_updated = False
+        closing_row_names = ["Closing Stock (Raw Materials)", "Closing Stock (Work-in-Process)", "Closing Stock (Finished Goods)", "Closing Inventory"]
+
+        for cell in cells_data:
+            row_id = cell.get('row_id')
+            year_id = cell.get('year_setting_id')
+            value = float(cell.get('value', 0))
+            
+            row = rows_map.get(row_id)
+            year_setting = years_map.get(year_id)
+            
+            if not row or not year_setting:
                 continue
+                
+            updated_groups.add(row.group)
+            if row.name in closing_row_names:
+                any_stock_updated = True
+            
+            dp = data_map.get((row_id, year_id))
+            if dp:
+                if float(dp.value) != value:
+                    dp.value = value
+                    to_update.append(dp)
+            else:
+                to_create.append(FinancialData(row=row, year_setting=year_setting, value=value))
+
+        # Perform bulk data updates
+        if to_update:
+            FinancialData.objects.bulk_update(to_update, ['value'])
+        if to_create:
+            FinancialData.objects.bulk_create(to_create)
         
-        self._populate_opening_stocks(report)
-        
-        updated_groups = {row.group for row in updated_rows}
+        # Post-processing: Only run stock flow if stock rows were actually changed
+        if any_stock_updated:
+            self._populate_opening_stocks(report)
+            
+        # Bulk recalculate totals for affected groups
         for group in updated_groups:
             self._calculate_group_totals(group, report)
             
-        return Response({"status": f"Successfully saved {len(cells)} cells."}, status=status.HTTP_200_OK)
+        return Response({"status": f"Successfully saved {len(cells_data)} cells."}, status=status.HTTP_200_OK)
     
-    def _calculate_group_totals(self, group, report):
-        """Calculate and save totals for all total rows in a group"""
-        total_rows = group.rows.filter(is_total_row=True)
-        
-        for total_row in total_rows:
-            # Get all non-total, non-calculated rows in this group
-            item_rows = group.rows.filter(is_total_row=False, is_calculated=False)
-            
-            # Calculate totals for each year
-            for year_setting in report.year_settings.all():
-                total_value = 0
-                for item_row in item_rows:
-                    try:
-                        data_point = FinancialData.objects.get(row=item_row, year_setting=year_setting)
-                        row_value = float(data_point.value)
-                        
-                        # Special calculation rules
-                        if (total_row.name == "= Cost of Goods Sold" and 
-                            ('Closing Stock' in item_row.name or 'Closing Inventory' in item_row.name)):
-                            # Subtract closing stock for COGS calculation
-                            total_value -= row_value
-                        elif total_row.name == "Total Assets":
-                            # For Total Assets, sum all asset group totals
-                            if item_row.is_total_row:
-                                total_value += row_value
-                        elif total_row.name == "Total Liabilities and Net Worth":
-                            # For Total Liabilities, sum all liability group totals
-                            if item_row.is_total_row:
-                                total_value += row_value
-                        else:
-                            # Normal addition for all other totals
-                            total_value += row_value
-                            
-                    except FinancialData.DoesNotExist:
-                        pass  # No data for this row/year combination
-                
-                # Save the calculated total
-                FinancialData.objects.update_or_create(
-                    row=total_row,
-                    year_setting=year_setting,
-                    defaults={'value': total_value}
-                )
-    
-    def _populate_opening_stocks(self, report):
-        """Populate opening stocks from previous year's closing stocks"""
-        opening_stock_names = [
-            "Opening Stock (Raw Materials)",
-            "Opening Stock (Work-in-Process)", 
-            "Opening Stock (Finished Goods)",
-            "Opening Inventory"
-        ]
-        
-        closing_stock_names = [
-            "Closing Stock (Raw Materials)",
-            "Closing Stock (Work-in-Process)", 
-            "Closing Stock (Finished Goods)",
-            "Closing Inventory"
-        ]
-        
-        # Get all year settings ordered by year
-        year_settings = list(report.year_settings.all().order_by('year'))
-        
-        for i, opening_name in enumerate(opening_stock_names):
-            closing_name = closing_stock_names[i]
-            
-            try:
-                # Find opening and closing rows
-                opening_rows = FinancialRow.objects.filter(
-                    group__report=report,
-                    name=opening_name
-                )
-                closing_rows = FinancialRow.objects.filter(
-                    group__report=report,
-                    name=closing_name
-                )
-                
-                for opening_row in opening_rows:
-                    for closing_row in closing_rows:
-                        # For each year (except first), copy closing stock from previous year
-                        for j in range(1, len(year_settings)):
-                            current_year = year_settings[j]
-                            previous_year = year_settings[j-1]
-                            
-                            try:
-                                # Get previous year's closing stock
-                                closing_data = FinancialData.objects.get(
-                                    row=closing_row,
-                                    year_setting=previous_year
-                                )
-                                
-                                # Set current year's opening stock
-                                FinancialData.objects.update_or_create(
-                                    row=opening_row,
-                                    year_setting=current_year,
-                                    defaults={'value': closing_data.value}
-                                )
-                            except FinancialData.DoesNotExist:
-                                pass  # No closing stock data for previous year
-                                
-            except FinancialRow.DoesNotExist:
-                pass  # Row doesn't exist in this report
 # --- Loan Schedule ViewSet ---
 class LoanScheduleViewSet(viewsets.ModelViewSet):
     """
